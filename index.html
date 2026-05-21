@@ -290,6 +290,98 @@ body{font-family:'Inter',sans-serif;background:var(--paper);color:var(--ink);min
 <div class="toast" id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, doc, setDoc, getDoc, collection, getDocs, orderBy, query } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBuWXBksBYW_VyBF0eqe1E6hTmXb5pntd0",
+  authDomain: "novacard-analitica.firebaseapp.com",
+  projectId: "novacard-analitica",
+  storageBucket: "novacard-analitica.firebasestorage.app",
+  messagingSenderId: "33145947321",
+  appId: "1:33145947321:web:0d3b918270f789cf518768"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+window._db = db;
+window._fbReady = true;
+
+// ── SAVE STATE TO FIREBASE ──
+window.saveToFirebase = async function() {
+  try {
+    const db = window._db;
+    const todayKey = getTodayKey();
+    await setDoc(doc(db, 'turno', 'current'), {
+      supervisors: state.supervisors,
+      todayClosed: state.todayClosed,
+      todayDate: state.todayDate,
+      updatedAt: new Date().toISOString()
+    });
+  } catch(e) { console.warn('Firebase save error:', e); }
+};
+
+// ── SAVE HISTORY DAY TO FIREBASE ──
+window.saveHistoryDay = async function(entry) {
+  try {
+    const db = window._db;
+    const key = entry.date.replace(/\//g,'-');
+    await setDoc(doc(db, 'historial', key), entry);
+  } catch(e) { console.warn('Firebase history save error:', e); }
+};
+
+// ── LOAD FROM FIREBASE ──
+window.loadFromFirebase = async function() {
+  try {
+    const db = window._db;
+    // Load current turno
+    const turnoDoc = await getDoc(doc(db, 'turno', 'current'));
+    if(turnoDoc.exists()) {
+      const data = turnoDoc.data();
+      if(data.supervisors && Array.isArray(data.supervisors) && data.supervisors.length > 0) {
+        state.supervisors = data.supervisors.map(sup => ({
+          name: sup.name || 'Supervisor',
+          sales: Array.isArray(sup.sales) ? sup.sales.slice(0,8).map(v => v===null||v===undefined ? '' : v) : Array(8).fill(''),
+          liners: Array.isArray(sup.liners) && sup.liners.length > 0 ? sup.liners : [{name:'Liner 1'}]
+        }));
+        state.todayClosed = data.todayClosed || false;
+        state.todayDate = data.todayDate || '';
+      }
+    }
+    // Auto-reset if new day
+    const todayKey = getTodayKey();
+    if(state.todayDate && state.todayDate !== todayKey) {
+      state.supervisors.forEach(sup => { sup.sales = Array(8).fill(''); });
+      state.todayClosed = false;
+      state.todayDate = todayKey;
+      await window.saveToFirebase();
+    } else if(!state.todayDate) {
+      state.todayDate = todayKey;
+    }
+    // Load history
+    const histSnap = await getDocs(collection(db, 'historial'));
+    state.history = [];
+    histSnap.forEach(d => state.history.push(d.data()));
+    state.history.sort((a,b) => a.date < b.date ? -1 : 1);
+    // Render after load
+    renderSupArea();
+    setDate();
+    updateClock();
+    showToast('✓ Datos cargados desde la nube');
+  } catch(e) {
+    console.warn('Firebase load error:', e);
+    showToast('Sin conexión — usando datos locales');
+    loadStateLocal();
+    renderSupArea();
+    setDate();
+    updateClock();
+  }
+};
+
+// Start loading
+window.loadFromFirebase();
+</script>
 <script>
 // ═══════════════════════════════════════
 // CONSTANTS
@@ -343,9 +435,10 @@ let charts={};
 // ═══════════════════════════════════════
 function saveState(){
   try{localStorage.setItem(STORAGE_KEY,JSON.stringify(state));}catch(e){}
+  if(window._fbReady) window.saveToFirebase();
 }
 
-function loadState(){
+function loadStateLocal(){
   try{
     const raw=localStorage.getItem(STORAGE_KEY);
     if(!raw)return;
@@ -548,6 +641,7 @@ function closeDayAndSave(){
   state.todayClosed=true;
   state.todayDate=getTodayKey();
   saveState();
+  if(window._fbReady) window.saveHistoryDay(entry);
   updateCloseDayBtn();
 
   const avgAcc=entry.supervisors.filter(s=>s.accuracy!=null).map(s=>s.accuracy);
@@ -967,10 +1061,13 @@ function setDate(){
 // ═══════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════
-loadState();
-renderSupArea();
-setDate();
-updateClock();
+// Firebase loads async — fallback to local if offline
+if(!window._fbReady) {
+  loadStateLocal();
+  renderSupArea();
+  setDate();
+  updateClock();
+}
 setInterval(updateClock,1000);
 </script>
 </body>
