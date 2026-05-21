@@ -253,27 +253,33 @@ body{font-family:'Inter',sans-serif;background:var(--paper);color:var(--ink);min
 
   <div id="tab-grafica" class="tab-content">
     <div class="section-header"><div class="section-title">Análisis y proyección</div></div>
+    <div class="reg-card" id="reg-card" style="margin-bottom:16px"></div>
     <div class="chart-grid">
-      <div class="chart-card">
-        <div class="chart-eyebrow"><i class="ti ti-trending-up" style="margin-right:4px"></i>Ventas acumuladas + proyección</div>
-        <div class="chart-wrap"><canvas id="chart-cum"></canvas></div>
-        <div class="chart-legend" id="legend-cum"></div>
-      </div>
-      <div class="chart-card">
+      <div class="chart-card" style="padding-bottom:12px">
         <div class="chart-eyebrow"><i class="ti ti-chart-bar" style="margin-right:4px"></i>Ventas por hora</div>
-        <div class="chart-wrap"><canvas id="chart-bar"></canvas></div>
+        <div class="chart-wrap" style="height:200px"><canvas id="chart-bar"></canvas></div>
         <div class="chart-legend" id="legend-bar"></div>
       </div>
-    </div>
-    <div class="reg-card" id="reg-card"></div>
-    <div class="chart-grid">
       <div class="chart-card">
-        <div class="chart-eyebrow"><i class="ti ti-chart-area" style="margin-right:4px"></i>Media móvil 3h vs ventas reales</div>
-        <div class="chart-wrap"><canvas id="chart-ma"></canvas></div>
+        <div class="chart-eyebrow"><i class="ti ti-trophy" style="margin-right:4px"></i>Eficiencia por supervisor (ventas / liner)</div>
+        <div class="chart-wrap"><canvas id="chart-efficiency"></canvas></div>
+        <div class="chart-legend" id="legend-efficiency"></div>
+        <hr style="border:none;border-top:1px solid var(--rule);margin:12px 0">
+        <div style="font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.1em;color:var(--ink4);margin-bottom:8px">Ranking de eficiencia actual</div>
+        <div id="efficiency-ranking"></div>
       </div>
+    </div>
+    <div class="chart-grid">
+
       <div class="chart-card">
-        <div class="chart-eyebrow"><i class="ti ti-history" style="margin-right:4px"></i>Promedio histórico vs hoy</div>
-        <div class="chart-wrap"><canvas id="chart-hist-compare"></canvas></div>
+        <div class="chart-eyebrow"><i class="ti ti-eye" style="margin-right:4px"></i>Predicción vs realidad por hora</div>
+        <div id="chart-vs-container"></div>
+      </div>
+    </div>
+    <div class="chart-grid">
+      <div class="chart-card" style="grid-column:1/-1">
+        <div class="chart-eyebrow"><i class="ti ti-math-function" style="margin-right:4px"></i>Regresión lineal por supervisor</div>
+        <div id="chart-regression-container"></div>
       </div>
     </div>
     <div class="chart-grid">
@@ -339,8 +345,22 @@ window.saveToFirebase = async function() {
 window.saveHistoryDay = async function(entry) {
   try {
     const db = window._db;
-    const key = entry.date.replace(/\//g,'-');
-    await setDoc(doc(db, 'historial', key), entry);
+    const dateKey = entry.date.replace(/\//g,'-');
+    // Save full day snapshot
+    await setDoc(doc(db, 'historial', dateKey), entry);
+    // Save per-supervisor document for clean model training
+    for(const sup of entry.supervisors){
+      const supKey = sup.name.trim().replace(/\s+/g,'_').toLowerCase();
+      const supDocRef = doc(db, 'historial_sup', supKey);
+      const existing = await getDoc(supDocRef);
+      const days = existing.exists() ? (existing.data().days || []) : [];
+      // Upsert by date
+      const idx = days.findIndex(d => d.date === entry.date);
+      const record = {date:entry.date, total:sup.total, meta:sup.meta, projected:sup.projected, hourly:sup.hourly, accuracy:sup.accuracy};
+      if(idx >= 0) days[idx] = record;
+      else days.push(record);
+      await setDoc(supDocRef, {name:sup.name, days});
+    }
   } catch(e) { console.warn('Firebase history save error:', e); }
 };
 
@@ -372,11 +392,20 @@ window.loadFromFirebase = async function() {
     } else if(!state.todayDate) {
       state.todayDate = todayKey;
     }
-    // Load history
+    // Load full history
     const histSnap = await getDocs(collection(db, 'historial'));
     state.history = [];
     histSnap.forEach(d => state.history.push(d.data()));
     state.history.sort((a,b) => a.date < b.date ? -1 : 1);
+    // Load per-supervisor history for model training
+    state.supHistory = {};
+    try {
+      const supHistSnap = await getDocs(collection(db, 'historial_sup'));
+      supHistSnap.forEach(d => {
+        const data = d.data();
+        state.supHistory[data.name] = data.days || [];
+      });
+    } catch(e) { console.warn('supHistory load error:', e); }
     // Render after load
     renderSupArea();
     setDate();
@@ -437,6 +466,7 @@ const state={
     {name:'Supervisor 2',sales:Array(8).fill(''),liners:[{name:'Liner D'},{name:'Liner E'}]}
   ],
   history:[],        // [{date,closedAt,supervisors:[{name,total,meta,projected,hourly,accuracy}]}]
+  supHistory:{}      // {supervisorName: [{date,total,meta,projected,hourly,accuracy}]} — per-supervisor model training data
   todayClosed:false, // flag: day already closed today
   todayDate:'',      // YYYY-MM-DD of the current day data
   testMode:false     // if true, data won't be saved to history or train the model
@@ -548,21 +578,23 @@ function linReg(xs,ys){
   return{slope,intercept,r2};
 }
 
-// Self-correcting regression: adjusts intercept based on historical bias
+// Self-correcting regression: adjusts intercept based on per-supervisor historical bias
 function adjustedReg(sup,si){
   const{xs,ys}=getXY(sup);
   const reg=xs.length>=2?linReg(xs,ys):null;
   if(!reg)return null;
-  const pastDays=state.history.filter(d=>d.supervisors&&d.supervisors[si]);
+  // Use per-supervisor history by NAME (not array index) for accurate training
+  const supDays=(state.supHistory&&state.supHistory[sup.name])||[];
+  // Fallback to global history if supHistory not loaded yet
+  const fallbackDays=state.history.filter(d=>d.supervisors&&d.supervisors[si]&&d.supervisors[si].name===sup.name);
+  const pastDays=supDays.length>0?supDays:fallbackDays.map(d=>d.supervisors[si]);
   if(pastDays.length<2)return{...reg,corrected:false};
-  // Calculate average prediction error (real - predicted)
   const errors=pastDays
-    .map(d=>{const s=d.supervisors[si];return(s&&s.projected&&s.total)?s.total-s.projected:null;})
+    .map(d=>(d&&d.projected&&d.total)?d.total-d.projected:null)
     .filter(e=>e!==null);
   if(errors.length===0)return{...reg,corrected:false};
   const avgError=errors.reduce((a,b)=>a+b,0)/errors.length;
-  // Distribute correction over remaining hours
-  const remaining=10-xs.length;
+  const remaining=TOTAL_WORK_HOURS-xs.length;
   const perHour=remaining>0?avgError/remaining:0;
   return{...reg,intercept:reg.intercept+perHour,corrected:true,avgError:Math.round(avgError),daysUsed:errors.length};
 }
@@ -570,13 +602,17 @@ function adjustedReg(sup,si){
 function getXY(sup){
   const xs=[],ys=[];
   sup.sales.forEach((v,i)=>{
-    if(v!==''&&v!==null&&!isNaN(v)&&Number(v)>=0){xs.push(i+1);ys.push(Number(v));}
+    // Explicitly treat "0" and 0 as valid data — only skip empty/null/undefined
+    const str=String(v).trim();
+    if(str!==''&&str!=='null'&&str!=='undefined'&&!isNaN(str)){
+      xs.push(i+1);ys.push(Number(str));
+    }
   });
   return{xs,ys};
 }
-function hourlyVal(sup){return sup.sales.map(v=>(v!==''&&v!==null&&!isNaN(v)&&Number(v)>=0)?Number(v):0);}
+function hourlyVal(sup){return sup.sales.map(v=>{const s=String(v).trim();return(s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s))?Number(s):0;});}
 function supTotal(sup){return hourlyVal(sup).reduce((a,b)=>a+b,0);}
-function hoursLogged(sup){return sup.sales.filter(v=>v!==''&&v!==null&&!isNaN(v)&&Number(v)>=0).length;}
+function hoursLogged(sup){return sup.sales.filter(v=>{const s=String(v).trim();return s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s);}).length;}
 function supMeta(si){return state.supervisors[si].liners.length*META_PER_LINER;}
 function avgPerHour(sup){const h=hoursLogged(sup);return h>0?(supTotal(sup)/h):0;}
 function paceNeeded(sup,si){
@@ -606,14 +642,23 @@ function projectEnd(sup,si){
   const reg=si!==undefined?adjustedReg(sup,si):linReg(xs,ys);
   if(!reg&&xs.length===1)return Math.round(ys[0]*TOTAL_WORK_HOURS);
   if(!reg)return null;
+  const currentAvg=ys.length>0?ys.reduce((a,b)=>a+b,0)/ys.length:0;
+  // Cap: regression can't predict more than 1.5x current avg per hour
+  // This prevents early wild extrapolation with few data points
+  const cap=Math.max(currentAvg*1.5, currentAvg+2);
   let total=0;
-  // Only 8 working slots (break excluded from array)
   for(let h=1;h<=TOTAL_WORK_HOURS;h++){
     const v=sup.sales[h-1];
-    if(v!==''&&v!==null&&!isNaN(v)&&Number(v)>=0)total+=Number(v);
-    else total+=Math.max(0,Math.round(reg.slope*h+reg.intercept));
+    const vs=String(v).trim();
+    if(vs!==''&&vs!=='null'&&vs!=='undefined'&&!isNaN(vs)){
+      total+=Number(vs);
+    } else {
+      const regEst=reg.slope*h+reg.intercept;
+      // Floor = current avg, Cap = 1.5x avg to prevent wild extrapolation
+      total+=Math.min(cap, Math.max(currentAvg, Math.max(0, regEst)));
+    }
   }
-  return total;
+  return Math.round(total);
 }
 function historicalHourlyAvg(si){
   const days=state.history.filter(d=>d.supervisors&&d.supervisors[si]&&d.supervisors[si].hourly);
@@ -753,7 +798,7 @@ function renderKPIs(){
   document.getElementById('kpi-area').innerHTML=`
     <div class="kpi-card kpi-navy"><div class="k-eyebrow">Total acumulado</div><div class="k-val">${gT}</div><div class="k-sub">${pct}% de meta del día</div></div>
     <div class="kpi-card kpi-accent"><div class="k-eyebrow">Meta total</div><div class="k-val">${gM}</div><div class="k-sub">${gL} liners × 3 ventas</div></div>
-    <div class="kpi-card kpi-forest"><div class="k-eyebrow">Proyección al cierre</div><div class="k-val">${vP>0?gP:'—'}</div><div class="k-sub">${state.history.length>0?'Con '+state.history.length+' día(s) de entrenamiento':'Sin historial aún'}</div></div>
+    <div class="kpi-card kpi-forest"><div class="k-eyebrow">Proyección al cierre</div><div class="k-val">${vP>0?gP:'—'}</div><div class="k-sub">${vP>0?Math.round(gP/gM*100)+'% de meta'+(state.history.length>0?' · '+state.history.length+' día(s)':''):'Sin datos aún'}</div></div>
     <div class="kpi-card kpi-gold"><div class="k-eyebrow">Precisión del modelo</div><div class="k-val">${avgAcc!=null?avgAcc+'%':'—'}</div><div class="k-sub">promedio histórico</div></div>
   `;
 }
@@ -770,7 +815,8 @@ function renderSupArea(){
     const pct=proj!==null?Math.round(proj/meta*100):null;
     const progPct=meta>0?Math.min(100,Math.round(total/meta*100)):0;
     const reg=adjustedReg(sup,si);
-    const hv=hourlyVal(sup).filter(v=>v>0);
+    // Include zeros — only exclude unlogged hours (empty string)
+    const hv=sup.sales.map((v,i)=>{const s=String(v).trim();return(s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s))?Number(s):null;}).filter(v=>v!==null);
     const sd=hv.length>=2?stdDev(hv):0;
     const cvVal=hv.length>=2?cv(hv):null;
     const hMean=hv.length>0?hv.reduce((a,b)=>a+b,0)/hv.length:0;
@@ -834,11 +880,21 @@ function renderSupArea(){
         ${badge}
       </div>
       <div class="sup-body">
-        <div class="metrics-grid">
+        <div class="metrics-grid" style="grid-template-columns:repeat(5,1fr)">
           <div class="metric-box"><div class="m-eyebrow">Acumulado</div><div class="m-val ${mvCls}">${total}</div><div class="m-sub">de ${meta} meta</div></div>
           <div class="metric-box"><div class="m-eyebrow">Proyección cierre</div><div class="m-val ${projMvCls}">${proj!=null?proj:'—'}</div><div class="m-sub">${pct!=null?pct+'% de meta':''}</div></div>
           <div class="metric-box"><div class="m-eyebrow">Promedio / hora</div><div class="m-val ${mvCls}">${logged>0?avg.toFixed(1):'—'}</div><div class="m-sub">ventas por hora</div></div>
           <div class="metric-box"><div class="m-eyebrow">Requiere / hora</div><div class="m-val ${paceMvCls}">${pace!=null&&pace>0?pace:'—'}</div><div class="m-sub">para cumplir meta</div></div>
+          ${(()=>{
+            const deficit=pace!=null&&logged>0?Math.round(pace-avg):null;
+            const defCls=deficit==null?'':deficit<=0?'mv-forest':deficit<=2?'mv-gold':'mv-accent';
+            const defNote=deficit==null?'':deficit<=0?'va al ritmo':deficit<=2?'brecha moderada':'brecha crítica';
+            return `<div class="metric-box" style="border-left:2px solid ${deficit==null?'var(--rule)':deficit<=0?'#2e7d32':deficit<=2?'#b45309':'var(--accent)'}">
+              <div class="m-eyebrow">Ventas perdidas/hora</div>
+              <div class="m-val ${defCls}">${deficit!=null?(deficit>0?'+'+deficit:'0'):'—'}</div>
+              <div class="m-sub">${defNote}</div>
+            </div>`;
+          })()}
         </div>
         <div class="progress-row"><span>Progreso</span><span style="color:${fillColor};font-weight:600">${progPct}%</span></div>
         <div class="progress-bg"><div class="progress-fill" style="width:${progPct}%;background:${fillColor}"></div></div>
@@ -846,10 +902,10 @@ function renderSupArea(){
         <div class="hour-grid">
           ${HOURS.map((h,hi)=>{
             const v=sup.sales[hi];
-            const hasVal=v!==''&&v!==null&&!isNaN(v)&&Number(v)>=0;
+            const hasVal=(()=>{const s=String(v).trim();return s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s);})();
             const numV=hasVal?Number(v):0;
             const anom=hasVal&&hv.length>=3&&isAnomaly(numV,hMean,sd);
-            return`<div class="hour-cell"><div class="hlabel">${h}</div><input type="number" min="0" value="${hasVal?numV:''}" placeholder="—" class="${hasVal?'has-val':''} ${anom?'anomaly':''}" oninput="state.supervisors[${si}].sales[${hi}]=this.value;renderSupArea()"></div>`;
+            return`<div class="hour-cell"><div class="hlabel">${h}</div><input type="number" min="0" value="${hasVal?numV:''}" placeholder="—" class="${hasVal?'has-val':''} ${anom?'anomaly':''}" oninput="state.supervisors[${si}].sales[${hi}]=(this.value===''?'':this.value);renderSupArea()"></div>`;
           }).join('')}
         </div>
         ${regHtml}${analyticsHtml}${alertHtml}
@@ -881,57 +937,157 @@ function buildCumProj(sup,si){
 
 function renderCharts(){
   const sups=state.supervisors;
+  const barOpts={...baseOpts,scales:{x:{ticks:{autoSkip:false,font:fonts,color:tc},grid:{display:false}},y:{beginAtZero:true,ticks:{font:fonts,color:tc},grid:{color:gc}}}};
 
-  // Cumulative + projection
-  destroyChart('cum');
-  const cumDatasets=[];
-  sups.forEach((sup,si)=>{
-    const cp=buildCumProj(sup,si);
-    const meta=supMeta(si);
-    const ml=HOURS.map((_,i)=>Math.round(meta*(i+1)/TOTAL_WORK_HOURS));
-    cumDatasets.push({label:sup.name+' real',data:cp.real,borderColor:supColor(si),backgroundColor:'transparent',pointRadius:4,pointBackgroundColor:supColor(si),tension:0.3,spanGaps:false,borderWidth:2});
-    cumDatasets.push({label:sup.name+' proy.',data:cp.proj,borderColor:supColor(si),borderDash:[5,4],backgroundColor:'transparent',pointRadius:0,tension:0.3,spanGaps:false,borderWidth:1.5});
-    cumDatasets.push({label:'Meta '+sup.name,data:ml,borderColor:supColor(si).replace(')',',0.2)').replace('rgb','rgba'),borderDash:[2,4],backgroundColor:'transparent',pointRadius:0,borderWidth:1});
-  });
-  charts['cum']=new Chart(document.getElementById('chart-cum').getContext('2d'),{type:'line',data:{labels:HOURS,datasets:cumDatasets},options:baseOpts});
-  document.getElementById('legend-cum').innerHTML=sups.map((s,si)=>
-    `<span><span class="leg-sq" style="background:${supColor(si)}"></span>${s.name}</span>`
-  ).join('');
-
-  // Bar per hour
+  // ── 1. Ventas por hora (barras) ──
   destroyChart('bar');
   charts['bar']=new Chart(document.getElementById('chart-bar').getContext('2d'),{
     type:'bar',
     data:{labels:HOURS,datasets:sups.map((sup,si)=>({
       label:sup.name,data:hourlyVal(sup),
-      backgroundColor:supColor(si)+'bb',borderRadius:2
+      backgroundColor:supColor(si)+'bb',borderRadius:3
     }))},
-    options:{...baseOpts,scales:{x:{ticks:{autoSkip:false,font:fonts,color:tc},grid:{display:false}},y:{beginAtZero:true,ticks:{font:fonts,color:tc},grid:{color:gc}}}}
+    options:{...barOpts,plugins:{legend:{display:false}},layout:{padding:{bottom:0}}}
   });
   document.getElementById('legend-bar').innerHTML=sups.map((s,si)=>
     `<span><span class="leg-sq" style="background:${supColor(si)}bb"></span>${s.name}</span>`
   ).join('');
 
-  // Moving average
-  destroyChart('ma');
-  const maDatasets=[];
-  sups.forEach((sup,si)=>{
-    const hv=hourlyVal(sup),ma=movingAvg(hv,3);
-    maDatasets.push({data:hv,borderColor:supColor(si)+'44',backgroundColor:'transparent',pointRadius:2,tension:0,borderWidth:1,label:sup.name+' real'});
-    maDatasets.push({data:ma,borderColor:supColor(si),backgroundColor:'transparent',pointRadius:0,tension:0.4,borderWidth:2.5,spanGaps:true,label:sup.name+' MA3'});
+  // ── 2. Eficiencia: ventas / liner por hora (línea) ──
+  // Shows who is getting more out of each liner each hour
+  destroyChart('eff');
+  const effDatasets=sups.map((sup,si)=>{
+    const liners=sup.liners.length||1;
+    const effData=hourlyVal(sup).map(v=>v>0?parseFloat((v/liners).toFixed(2)):null);
+    return{
+      label:sup.name,data:effData,
+      borderColor:supColor(si),backgroundColor:supColor(si)+'18',
+      pointRadius:5,pointBackgroundColor:supColor(si),
+      tension:0.3,fill:true,spanGaps:false,borderWidth:2.5
+    };
   });
-  charts['ma']=new Chart(document.getElementById('chart-ma').getContext('2d'),{type:'line',data:{labels:HOURS,datasets:maDatasets},options:baseOpts});
-
-  // Historical compare
-  destroyChart('histc');
-  const hcDatasets=[];
-  sups.forEach((sup,si)=>{
-    hcDatasets.push({data:hourlyVal(sup),borderColor:supColor(si),backgroundColor:'transparent',pointRadius:3,tension:0.3,borderWidth:2,label:sup.name+' hoy'});
-    const ha=historicalHourlyAvg(si);
-    if(ha)hcDatasets.push({data:ha,borderColor:supColor(si)+'55',borderDash:[4,3],backgroundColor:'transparent',pointRadius:0,tension:0.3,borderWidth:1.5,spanGaps:true,label:'Hist. '+sup.name});
+  charts['eff']=new Chart(document.getElementById('chart-efficiency').getContext('2d'),{
+    type:'line',data:{labels:HOURS,datasets:effDatasets},
+    options:{...baseOpts,plugins:{
+      legend:{display:false},
+      tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.parsed.y} ventas/liner`}}
+    }}
   });
-  charts['histc']=new Chart(document.getElementById('chart-hist-compare').getContext('2d'),{type:'line',data:{labels:HOURS,datasets:hcDatasets},options:baseOpts});
+  document.getElementById('legend-efficiency').innerHTML=sups.map((s,si)=>
+    `<span><span class="leg-sq" style="background:${supColor(si)}"></span>${s.name} (${s.liners.length} liners)</span>`
+  ).join('');
 
+  // Efficiency ranking
+  const rankData=sups.map((sup,si)=>{
+    const total=supTotal(sup);
+    const liners=sup.liners.length||1;
+    const logged=hoursLogged(sup);
+    const effPerHour=logged>0?total/liners/logged:0;
+    const meta=supMeta(si);
+    const proj=projectEnd(sup,si);
+    const pct=proj!=null?Math.round(proj/meta*100):0;
+    return{name:sup.name,si,total,liners,logged,effPerHour,pct,meta,proj};
+  }).sort((a,b)=>b.effPerHour-a.effPerHour);
+  const rankEl=document.getElementById('efficiency-ranking');
+  if(rankEl){
+    rankEl.innerHTML=rankData.map((r,rank)=>{
+      const medal=rank===0?'🥇':rank===1?'🥈':'🥉';
+      const barW=rankData[0].effPerHour>0?Math.round(r.effPerHour/rankData[0].effPerHour*100):0;
+      const statusColor=r.pct>=100?'var(--forest)':r.pct>=75?'var(--gold)':'var(--accent)';
+      return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <span style="font-size:16px;width:20px">${medal}</span>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;font-size:11px;font-weight:500;margin-bottom:3px">
+            <span style="color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px">${r.name}</span>
+            <span style="color:${statusColor};font-weight:600;flex-shrink:0;margin-left:8px">${r.effPerHour.toFixed(2)} v/liner/h</span>
+          </div>
+          <div style="background:var(--paper3);border-radius:3px;height:5px">
+            <div style="width:${barW}%;height:5px;border-radius:3px;background:${supColor(r.si)};transition:width 0.4s"></div>
+          </div>
+          <div style="font-size:10px;color:var(--ink4);margin-top:2px">${r.total} ventas · ${r.liners} liners · proy. ${r.proj!=null?r.proj:'—'} (${r.pct}%)</div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+
+
+  // ── 4. Predicción vs Realidad — one mini chart per supervisor ──
+  // Destroy old vs charts
+  Object.keys(charts).filter(k=>k.startsWith('vs_')).forEach(k=>destroyChart(k));
+  const vsContainer=document.getElementById('chart-vs-container');
+  vsContainer.innerHTML='';
+  sups.forEach((sup,si)=>{
+    const{xs,ys}=getXY(sup);
+    const reg=xs.length>=2?linReg(xs,ys):null;
+    const currentAvg=ys.length>0?ys.reduce((a,b)=>a+b,0)/ys.length:0;
+    // ─────────────────────────────────────────────────────────────────
+  // CAP TEMPORAL: limita la predicción a 1.5x el promedio actual.
+  // Esto evita que la regresión se dispare con pocos datos (ej: 0,6,6).
+  // Una vez que el modelo tenga 15-20 días de historial y su precisión
+  // promedio supere el 85%, este cap puede eliminarse para dejar que
+  // la regresión opere libremente sin restricción de techo.
+  // TODO: remover cap cuando accuracy_avg >= 85% && history.length >= 15
+  // ─────────────────────────────────────────────────────────────────
+  const cap=Math.max(currentAvg*1.5,currentAvg+2);
+    const realVals=HOURS.map((_,i)=>{
+      const s=String(sup.sales[i]).trim();
+      return(s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s))?Number(s):null;
+    });
+    const predLine=HOURS.map((_,i)=>{
+      if(!reg)return null;
+      const h=i+1;
+      const est=reg.slope*h+reg.intercept;
+      const s=String(sup.sales[i]).trim();
+      const isLogged=s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s);
+      return parseFloat((isLogged?Math.max(0,est):Math.min(cap,Math.max(currentAvg,Math.max(0,est)))).toFixed(1));
+    });
+    // Build mini card
+    const wrap=document.createElement('div');
+    wrap.style.cssText='margin-bottom:16px;padding-bottom:14px;border-bottom:0.5px solid var(--rule)';
+    if(si===sups.length-1)wrap.style.borderBottom='none';
+    const nameEl=document.createElement('div');
+    nameEl.style.cssText='font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--ink3);margin-bottom:6px;display:flex;align-items:center;gap:6px';
+    nameEl.innerHTML=`<span style="width:8px;height:8px;border-radius:50%;background:${supColor(si)};display:inline-block"></span>${sup.name}
+      <span style="margin-left:auto;font-size:9px;color:var(--ink4)">── real &nbsp;&nbsp; - - predicción</span>`;
+    const cvs=document.createElement('canvas');
+    cvs.style.height='110px';
+    const chartWrap=document.createElement('div');
+    chartWrap.style.cssText='position:relative;width:100%;height:110px';
+    chartWrap.appendChild(cvs);
+    wrap.appendChild(nameEl);
+    wrap.appendChild(chartWrap);
+    vsContainer.appendChild(wrap);
+    const key='vs_'+si;
+    charts[key]=new Chart(cvs.getContext('2d'),{
+      type:'line',
+      data:{labels:HOURS,datasets:[
+        {
+          label:'Real',data:realVals,
+          borderColor:supColor(si),backgroundColor:'transparent',
+          borderWidth:2.5,pointRadius:4,pointBackgroundColor:supColor(si),
+          tension:0.3,spanGaps:false
+        },
+        {
+          label:'Predicción',data:predLine,
+          borderColor:supColor(si),backgroundColor:'transparent',
+          borderWidth:1.5,pointRadius:3,
+          pointBackgroundColor:'#fff',pointBorderColor:supColor(si),pointBorderWidth:1.5,
+          borderDash:[5,4],tension:0.3,spanGaps:true
+        }
+      ]},
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{ticks:{autoSkip:false,font:{size:9,family:'Inter,sans-serif'},color:tc},grid:{color:gc}},
+          y:{beginAtZero:true,ticks:{font:{size:9,family:'Inter,sans-serif'},color:tc},grid:{color:gc}}
+        }
+      }
+    });
+  });
+
+  renderRegressionChart();
   renderAccuracyChart();
 
   // Regression info
@@ -941,7 +1097,104 @@ function renderCharts(){
     if(reg)txt+=`<b>${sup.name}</b>: pendiente <b style="color:${supColor(si)}">${reg.slope.toFixed(2)}</b>/hora · R²=<b>${reg.r2.toFixed(2)}</b>${reg.corrected?` · corregido con ${reg.daysUsed} día(s)`:''} → proyección: <b>${projectEnd(sup,si)}</b> ventas.<br>`;
   });
   if(!txt)txt='Se requieren al menos 2 horas de datos para activar la regresión.';
-  document.getElementById('reg-card').innerHTML=`<i class="ti ti-math-function" style="margin-right:6px;color:supColor(0)"></i>${txt}`;
+  document.getElementById('reg-card').innerHTML=`<i class="ti ti-math-function" style="margin-right:6px;color:var(--navy)"></i>${txt}`;
+}
+
+function renderRegressionChart(){
+  // Destroy old reg charts
+  Object.keys(charts).filter(k=>k.startsWith('reg_')).forEach(k=>destroyChart(k));
+  const container=document.getElementById('chart-regression-container');
+  if(!container)return;
+  container.innerHTML='';
+  state.supervisors.forEach((sup,si)=>{
+    const{xs,ys}=getXY(sup);
+    if(xs.length<2){
+      const msg=document.createElement('div');
+      msg.style.cssText='font-size:11px;color:var(--ink4);padding:8px 0';
+      msg.textContent=sup.name+': necesita al menos 2 horas de datos.';
+      container.appendChild(msg);
+      return;
+    }
+    const reg=linReg(xs,ys);
+    if(!reg)return;
+    const currentAvg=ys.reduce((a,b)=>a+b,0)/ys.length;
+    const cap=Math.max(currentAvg*1.5,currentAvg+2);
+    const trend=reg.slope>0.1?'↑ creciente':reg.slope<-0.1?'↓ decreciente':'→ estable';
+    const trendColor=reg.slope>0.1?'var(--forest)':reg.slope<-0.1?'var(--accent)':'var(--ink3)';
+
+    // Wrap
+    const wrap=document.createElement('div');
+    wrap.style.cssText='margin-bottom:20px;padding-bottom:16px;border-bottom:0.5px solid var(--rule)';
+    if(si===state.supervisors.length-1)wrap.style.borderBottom='none';
+
+    // Label
+    const label=document.createElement('div');
+    label.style.cssText='font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--ink3);margin-bottom:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap';
+    label.innerHTML=`<span style="width:8px;height:8px;border-radius:50%;background:${supColor(si)};display:inline-block"></span>
+      ${sup.name}
+      <span style="color:var(--ink4);font-weight:400">pendiente <b style="color:${supColor(si)}">${reg.slope.toFixed(2)}</b>/hora</span>
+      <span style="color:var(--ink4);font-weight:400">R²=<b>${reg.r2.toFixed(2)}</b></span>
+      <span style="color:${trendColor};font-weight:600">${trend}</span>`;
+
+    const chartWrap=document.createElement('div');
+    chartWrap.style.cssText='position:relative;width:100%;height:130px';
+    const cvs=document.createElement('canvas');
+    chartWrap.appendChild(cvs);
+    wrap.appendChild(label);
+    wrap.appendChild(chartWrap);
+    container.appendChild(wrap);
+
+    // Regression line — PURE model, no cap, no floor
+    // Cap/floor only exist in projectEnd() for dashboard display
+    // The model must see reality including negative trends
+    const minX=Math.min(...xs),maxX=Math.max(...xs);
+    const regLinePoints=[
+      {x:minX,y:parseFloat((reg.slope*minX+reg.intercept).toFixed(2))},
+      {x:maxX,y:parseFloat((reg.slope*maxX+reg.intercept).toFixed(2))}
+    ];
+
+    // Projection — pure regression extrapolation, no cap, no floor
+    const logged=hoursLogged(sup);
+    const projPoints=[{x:maxX,y:parseFloat((reg.slope*maxX+reg.intercept).toFixed(2))}];
+    for(let i=1;i<=TOTAL_WORK_HOURS-logged;i++){
+      const h=logged+i;
+      projPoints.push({x:h,y:parseFloat((reg.slope*h+reg.intercept).toFixed(2))});
+    }
+
+    const key='reg_'+si;
+    charts[key]=new Chart(cvs.getContext('2d'),{
+      type:'scatter',
+      data:{datasets:[
+        {
+          type:'scatter',label:'Ventas reales',
+          data:xs.map((x,i)=>({x,y:ys[i]})),
+          backgroundColor:supColor(si),pointRadius:6,pointHoverRadius:8
+        },
+        {
+          type:'line',label:'Línea de tendencia',
+          data:regLinePoints,
+          borderColor:supColor(si),backgroundColor:'transparent',
+          pointRadius:0,borderWidth:2.5,tension:0
+        },
+        {
+          type:'line',label:'Proyección',
+          data:projPoints,
+          borderColor:supColor(si)+'88',backgroundColor:'transparent',
+          pointRadius:0,borderWidth:1.5,borderDash:[5,4],tension:0
+        }
+      ]},
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{type:'linear',min:0.5,max:TOTAL_WORK_HOURS+0.5,
+            ticks:{font:fonts,color:tc,callback:v=>HOURS[Math.round(v)-1]||'',stepSize:1},
+            grid:{color:gc}},
+          y:{beginAtZero:true,ticks:{font:fonts,color:tc},grid:{color:gc}}
+        }
+      }
+    });
+  });
 }
 
 function renderAccuracyChart(){
