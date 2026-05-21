@@ -294,7 +294,20 @@ body{font-family:'Inter',sans-serif;background:var(--paper);color:var(--ink);min
 // ═══════════════════════════════════════
 // CONSTANTS
 // ═══════════════════════════════════════
-const HOURS=['10am','11am','12pm','1pm','2pm','3pm','4pm','5pm','6pm','7pm'];
+// Turno 10am-7pm con break 2-3pm
+// Horas de reporte (cierre de cada hora trabajada):
+// 10-11 → reporta a las 11am
+// 11-12 → reporta a las 12pm
+// 12-1  → reporta a las 1pm
+// 1-2   → reporta a las 2pm
+// [BREAK 2-3pm — no se reporta]
+// 3-4   → reporta a las 4pm
+// 4-5   → reporta a las 5pm
+// 5-6   → reporta a las 6pm
+// 6-7   → reporta a las 7pm
+const HOURS=['11am','12pm','1pm','2pm','4pm','5pm','6pm','7pm'];
+const BREAK_AFTER_INDEX=3; // break occurs after index 3 (2pm slot), before index 4 (4pm slot)
+const TOTAL_WORK_HOURS=8;  // 8 productive hours (excluding break)
 const META_PER_LINER=3;
 const SUP_PALETTE=[
   {color:'#1a2a5c',bg:'rgba(26,42,92,0.1)'},
@@ -306,8 +319,8 @@ const SUP_PALETTE=[
 ];
 function supColor(si){return SUP_PALETTE[si%SUP_PALETTE.length].color;}
 function supBg(si){return SUP_PALETTE[si%SUP_PALETTE.length].bg;}
-const STORAGE_KEY='novacard_v5';
-const SHIFT_START=9;   // 9am
+const STORAGE_KEY='novacard_v6';
+const SHIFT_START=10;  // 10am
 const SHIFT_END=19;    // 7pm
 
 // ═══════════════════════════════════════
@@ -315,8 +328,8 @@ const SHIFT_END=19;    // 7pm
 // ═══════════════════════════════════════
 const state={
   supervisors:[
-    {name:'Supervisor 1',sales:Array(10).fill(''),liners:[{name:'Liner A'},{name:'Liner B'},{name:'Liner C'}]},
-    {name:'Supervisor 2',sales:Array(10).fill(''),liners:[{name:'Liner D'},{name:'Liner E'}]}
+    {name:'Supervisor 1',sales:Array(8).fill(''),liners:[{name:'Liner A'},{name:'Liner B'},{name:'Liner C'}]},
+    {name:'Supervisor 2',sales:Array(8).fill(''),liners:[{name:'Liner D'},{name:'Liner E'}]}
   ],
   history:[],        // [{date,closedAt,supervisors:[{name,total,meta,projected,hourly,accuracy}]}]
   todayClosed:false, // flag: day already closed today
@@ -342,7 +355,7 @@ function loadState(){
     // Support dynamic number of supervisors
     state.supervisors=s.supervisors.map(sup=>({
       name:typeof sup.name==='string'&&sup.name.trim()?sup.name:'Supervisor',
-      sales:Array.isArray(sup.sales)&&sup.sales.length===10?sup.sales.map(v=>(v===null||v===undefined)?'':v):Array(10).fill(''),
+      sales:Array.isArray(sup.sales)&&Array.isArray(sup.sales)&&(sup.sales.length===8||sup.sales.length===10)?sup.sales.slice(0,8).map(v=>(v===null||v===undefined)?'':v):Array(8).fill(''),
       liners:Array.isArray(sup.liners)&&sup.liners.length>0?sup.liners.map(l=>({name:typeof l.name==='string'?l.name:'Liner'})):[{name:'Liner A'}]
     }));
     if(Array.isArray(s.history)) state.history=s.history;
@@ -353,7 +366,7 @@ function loadState(){
     const todayKey=getTodayKey();
     if(state.todayDate && state.todayDate!==todayKey){
       // New day detected — auto clear sales
-      state.supervisors.forEach(sup=>{sup.sales=Array(10).fill('');});
+      state.supervisors.forEach(sup=>{sup.sales=Array(8).fill('');});
       state.todayClosed=false;
       state.todayDate=todayKey;
       saveState();
@@ -417,7 +430,7 @@ function hoursLogged(sup){return sup.sales.filter(v=>v!==''&&v!==null&&!isNaN(v)
 function supMeta(si){return state.supervisors[si].liners.length*META_PER_LINER;}
 function avgPerHour(sup){const h=hoursLogged(sup);return h>0?(supTotal(sup)/h):0;}
 function paceNeeded(sup,si){
-  const rem=supMeta(si)-supTotal(sup),left=10-hoursLogged(sup);
+  const rem=supMeta(si)-supTotal(sup),left=TOTAL_WORK_HOURS-hoursLogged(sup);
   return left>0?Math.ceil(rem/left):null;
 }
 function stdDev(arr){
@@ -441,10 +454,11 @@ function isAnomaly(val,mean,sd){return sd>0&&Math.abs((val-mean)/sd)>2;}
 function projectEnd(sup,si){
   const{xs,ys}=getXY(sup);
   const reg=si!==undefined?adjustedReg(sup,si):linReg(xs,ys);
-  if(!reg&&xs.length===1)return Math.round(ys[0]*10);
+  if(!reg&&xs.length===1)return Math.round(ys[0]*TOTAL_WORK_HOURS);
   if(!reg)return null;
   let total=0;
-  for(let h=1;h<=10;h++){
+  // Only 8 working slots (break excluded from array)
+  for(let h=1;h<=TOTAL_WORK_HOURS;h++){
     const v=sup.sales[h-1];
     if(v!==''&&v!==null&&!isNaN(v)&&Number(v)>=0)total+=Number(v);
     else total+=Math.max(0,Math.round(reg.slope*h+reg.intercept));
@@ -454,7 +468,7 @@ function projectEnd(sup,si){
 function historicalHourlyAvg(si){
   const days=state.history.filter(d=>d.supervisors&&d.supervisors[si]&&d.supervisors[si].hourly);
   if(days.length===0)return null;
-  const avgs=Array(10).fill(0);
+  const avgs=Array(TOTAL_WORK_HOURS).fill(0);
   days.forEach(d=>{d.supervisors[si].hourly.forEach((v,i)=>{avgs[i]+=v;});});
   return avgs.map(v=>v/days.length);
 }
@@ -660,7 +674,7 @@ function renderSupArea(){
             title="Clic para editar nombre"
             oninput="state.supervisors[${si}].name=this.value;saveState()"
             onblur="renderSupArea()">
-          <div class="sup-meta-line">${sup.liners.length} liners · Meta: <b style="color:${supColor(si)}">${meta} ventas</b> · 9am–7pm</div>
+          <div class="sup-meta-line">${sup.liners.length} liners · Meta: <b style="color:${supColor(si)}">${meta} ventas</b> · 10am–7pm (break 2–3pm)</div>
         </div>
         ${badge}
       </div>
@@ -673,7 +687,7 @@ function renderSupArea(){
         </div>
         <div class="progress-row"><span>Progreso</span><span style="color:${fillColor};font-weight:600">${progPct}%</span></div>
         <div class="progress-bg"><div class="progress-fill" style="width:${progPct}%;background:${fillColor}"></div></div>
-        <div class="hour-section-label">Registro de ventas por hora</div>
+        <div class="hour-section-label">Registro de ventas por hora &nbsp;·&nbsp; <span style="color:var(--accent)">Break: 2pm – 3pm</span></div>
         <div class="hour-grid">
           ${HOURS.map((h,hi)=>{
             const v=sup.sales[hi];
@@ -706,7 +720,7 @@ function buildCumProj(sup,si){
     else{const est=reg?Math.max(0,Math.round(reg.slope*(i+1)+reg.intercept)):0;total+=est;real.push(null);proj.push(total);}
   });
   const lastR=real.reduce((a,v,i)=>v!=null?i:a,-1);
-  if(lastR>=0&&lastR<9&&proj[lastR+1]!=null)proj[lastR]=real[lastR];
+  if(lastR>=0&&lastR<TOTAL_WORK_HOURS-1&&proj[lastR+1]!=null)proj[lastR]=real[lastR];
   return{real,proj};
 }
 
@@ -719,7 +733,7 @@ function renderCharts(){
   sups.forEach((sup,si)=>{
     const cp=buildCumProj(sup,si);
     const meta=supMeta(si);
-    const ml=HOURS.map((_,i)=>Math.round(meta*(i+1)/10));
+    const ml=HOURS.map((_,i)=>Math.round(meta*(i+1)/TOTAL_WORK_HOURS));
     cumDatasets.push({label:sup.name+' real',data:cp.real,borderColor:supColor(si),backgroundColor:'transparent',pointRadius:4,pointBackgroundColor:supColor(si),tension:0.3,spanGaps:false,borderWidth:2});
     cumDatasets.push({label:sup.name+' proy.',data:cp.proj,borderColor:supColor(si),borderDash:[5,4],backgroundColor:'transparent',pointRadius:0,tension:0.3,spanGaps:false,borderWidth:1.5});
     cumDatasets.push({label:'Meta '+sup.name,data:ml,borderColor:supColor(si).replace(')',',0.2)').replace('rgb','rgba'),borderDash:[2,4],backgroundColor:'transparent',pointRadius:0,borderWidth:1});
@@ -903,7 +917,7 @@ function addLiner(si){state.supervisors[si].liners.push({name:'Nuevo liner'});sa
 function removeLiner(si,li){if(state.supervisors[si].liners.length>1){state.supervisors[si].liners.splice(li,1);}saveState();renderLiners();renderSupArea();}
 function addSupervisor(){
   const n=state.supervisors.length+1;
-  state.supervisors.push({name:'Supervisor '+n,sales:Array(10).fill(''),liners:[{name:'Liner 1'}]});
+  state.supervisors.push({name:'Supervisor '+n,sales:Array(8).fill(''),liners:[{name:'Liner 1'}]});
   saveState();renderLiners();renderSupArea();
   showToast('Supervisor '+n+' agregado');
 }
@@ -935,12 +949,12 @@ function updateClock(){
   if(now.getHours()===SHIFT_START&&now.getMinutes()===0&&now.getSeconds()===0){
     const todayKey=getTodayKey();
     if(state.todayDate!==todayKey){
-      state.supervisors.forEach(sup=>{sup.sales=Array(10).fill('');});
+      state.supervisors.forEach(sup=>{sup.sales=Array(8).fill('');});
       state.todayClosed=false;
       state.todayDate=todayKey;
       saveState();
       renderSupArea();
-      showToast('🌅 Nuevo turno iniciado automáticamente');
+      showToast('🌅 Nuevo turno iniciado (10am–7pm, break 2–3pm)');
     }
   }
   updateCloseDayBtn();
