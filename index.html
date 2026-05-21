@@ -219,6 +219,9 @@ body{font-family:'Inter',sans-serif;background:var(--paper);color:var(--ink);min
     <button class="tab-btn" onclick="showTab('liners')"><i class="ti ti-users"></i>Liners</button>
   </div>
   <div style="display:flex;align-items:center;gap:10px;padding:8px 0">
+    <button id="test-mode-btn" onclick="toggleTestMode()" style="display:flex;align-items:center;gap:5px;border:1.5px solid var(--rule);border-radius:var(--r);padding:6px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:Inter,sans-serif;transition:all 0.3s;background:var(--paper2);color:var(--ink3)">
+      <i class="ti ti-flask"></i> Modo prueba
+    </button>
     <span id="close-hint" style="font-size:10px;color:var(--ink4)"></span>
     <button id="close-day-btn" onclick="closeDayAndSave()">
       <i class="ti ti-device-floppy"></i> Cerrar día
@@ -228,10 +231,20 @@ body{font-family:'Inter',sans-serif;background:var(--paper);color:var(--ink);min
 
 <div class="container">
 
+  <div id="weekend-banner" style="display:none;text-align:center;padding:60px 24px;color:var(--ink3)">
+    <div style="font-size:48px;margin-bottom:16px">🗓️</div>
+    <div style="font-family:'Playfair Display',serif;font-size:24px;font-weight:600;color:var(--ink);margin-bottom:8px">Día no laborable</div>
+    <div style="font-size:14px;color:var(--ink3)">El call center no opera sábados ni domingos.<br>Nos vemos el lunes.</div>
+  </div>
+
   <div id="tab-ventas" class="tab-content active">
     <div class="section-header">
       <div class="section-title">Resumen del turno</div>
       <div class="section-date" id="date-line"></div>
+    </div>
+    <div id="test-mode-banner" style="display:none;background:#fff8e1;border:1.5px solid #f9a825;border-radius:var(--r-md);padding:10px 16px;margin-bottom:16px;font-size:12px;color:#7a5c00;display:none;align-items:center;gap:8px">
+      <i class="ti ti-flask" style="font-size:16px"></i>
+      <b>Modo prueba activo</b> — Los datos de hoy NO se guardarán en el historial ni entrenarán el modelo.
     </div>
     <div class="kpi-row" id="kpi-area"></div>
     <div class="double-rule"></div>
@@ -425,7 +438,8 @@ const state={
   ],
   history:[],        // [{date,closedAt,supervisors:[{name,total,meta,projected,hourly,accuracy}]}]
   todayClosed:false, // flag: day already closed today
-  todayDate:''       // YYYY-MM-DD of the current day data
+  todayDate:'',      // YYYY-MM-DD of the current day data
+  testMode:false     // if true, data won't be saved to history or train the model
 };
 
 let charts={};
@@ -472,6 +486,49 @@ function loadStateLocal(){
 function getTodayKey(){
   const d=new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function isWeekend(){
+  const day=new Date().getDay(); // 0=Sunday, 6=Saturday
+  return day===0||day===6;
+}
+
+function checkWeekend(){
+  const banner=document.getElementById('weekend-banner');
+  const container=document.querySelector('.container');
+  if(isWeekend()){
+    // Show weekend banner, hide tabs content
+    banner.style.display='block';
+    ['tab-ventas','tab-grafica','tab-historico','tab-liners'].forEach(id=>{
+      const el=document.getElementById(id);
+      if(el)el.style.display='none';
+    });
+    document.querySelector('.nav-tabs').style.opacity='0.4';
+    document.querySelector('.nav-tabs').style.pointerEvents='none';
+    document.getElementById('close-day-btn').style.display='none';
+    document.getElementById('test-mode-btn').style.display='none';
+  }
+}
+
+function toggleTestMode(){
+  state.testMode=!state.testMode;
+  const btn=document.getElementById('test-mode-btn');
+  const banner=document.getElementById('test-mode-banner');
+  if(state.testMode){
+    btn.style.background='#fff8e1';
+    btn.style.color='#7a5c00';
+    btn.style.borderColor='#f9a825';
+    btn.innerHTML='<i class="ti ti-flask"></i> Modo prueba ON';
+    banner.style.display='flex';
+    showToast('⚗️ Modo prueba activado — datos no se guardarán en historial');
+  } else {
+    btn.style.background='var(--paper2)';
+    btn.style.color='var(--ink3)';
+    btn.style.borderColor='var(--rule)';
+    btn.innerHTML='<i class="ti ti-flask"></i> Modo prueba';
+    banner.style.display='none';
+    showToast('Modo prueba desactivado');
+  }
 }
 
 // ═══════════════════════════════════════
@@ -638,6 +695,10 @@ function closeDayAndSave(){
   if(idx>=0)state.history[idx]=entry;
   else state.history.push(entry);
 
+  if(state.testMode){
+    showToast('⚗️ Modo prueba — día cerrado visualmente pero NO guardado en historial ni modelo');
+    return;
+  }
   state.todayClosed=true;
   state.todayDate=getTodayKey();
   saveState();
@@ -1069,6 +1130,7 @@ if(!window._fbReady) {
   updateClock();
 }
 setInterval(updateClock,1000);
+checkWeekend();
 </script>
 </body>
 </html>
