@@ -309,30 +309,37 @@ body{font-family:'Inter',sans-serif;background:var(--paper);color:var(--ink);min
 <div class="toast" id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
-<script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, doc, setDoc, getDoc, collection, getDocs, orderBy, query } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script>
+window._fbReady = false;
+window._db = null;
 
-const firebaseConfig = {
-  apiKey: "AIzaSyBuWXBksBYW_VyBF0eqe1E6hTmXb5pntd0",
-  authDomain: "novacard-analitica.firebaseapp.com",
-  projectId: "novacard-analitica",
-  storageBucket: "novacard-analitica.firebasestorage.app",
-  messagingSenderId: "33145947321",
-  appId: "1:33145947321:web:0d3b918270f789cf518768"
-};
-
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-window._db = db;
-window._fbReady = true;
+function initFirebase() {
+  try {
+    const firebaseConfig = {
+      apiKey: "AIzaSyBuWXBksBYW_VyBF0eqe1E6hTmXb5pntd0",
+      authDomain: "novacard-analitica.firebaseapp.com",
+      projectId: "novacard-analitica",
+      storageBucket: "novacard-analitica.firebasestorage.app",
+      messagingSenderId: "33145947321",
+      appId: "1:33145947321:web:0d3b918270f789cf518768"
+    };
+    if(!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    window._db = firebase.firestore();
+    window._fbReady = true;
+  } catch(e) {
+    console.warn('Firebase init error:', e);
+    window._fbReady = false;
+  }
+}
 
 // ── SAVE STATE TO FIREBASE ──
 window.saveToFirebase = async function() {
   try {
     const db = window._db;
     const todayKey = getTodayKey();
-    await setDoc(doc(db, 'turno', 'current'), {
+    await db.collection('turno').doc('current').set({
       supervisors: state.supervisors,
       todayClosed: state.todayClosed,
       todayDate: state.todayDate,
@@ -347,19 +354,19 @@ window.saveHistoryDay = async function(entry) {
     const db = window._db;
     const dateKey = entry.date.replace(/\//g,'-');
     // Save full day snapshot
-    await setDoc(doc(db, 'historial', dateKey), entry);
+    await db.collection('historial').doc(dateKey).set(entry);
     // Save per-supervisor document for clean model training
     for(const sup of entry.supervisors){
       const supKey = sup.name.trim().replace(/\s+/g,'_').toLowerCase();
-      const supDocRef = doc(db, 'historial_sup', supKey);
-      const existing = await getDoc(supDocRef);
-      const days = existing.exists() ? (existing.data().days || []) : [];
+      const supDocRef = db.collection('historial_sup').doc(supKey);
+      const existing = await supDocRef.get();
+      const days = existing.exists ? (existing.data().days || []) : [];
       // Upsert by date
       const idx = days.findIndex(d => d.date === entry.date);
       const record = {date:entry.date, total:sup.total, meta:sup.meta, projected:sup.projected, hourly:sup.hourly, accuracy:sup.accuracy};
       if(idx >= 0) days[idx] = record;
       else days.push(record);
-      await setDoc(supDocRef, {name:sup.name, days});
+      await supDocRef.set({name:sup.name, days});
     }
   } catch(e) { console.warn('Firebase history save error:', e); }
 };
@@ -369,8 +376,8 @@ window.loadFromFirebase = async function() {
   try {
     const db = window._db;
     // Load current turno
-    const turnoDoc = await getDoc(doc(db, 'turno', 'current'));
-    if(turnoDoc.exists()) {
+    const turnoDoc = await db.collection('turno').doc('current').get();
+    if(turnoDoc.exists) {
       const data = turnoDoc.data();
       if(data.supervisors && Array.isArray(data.supervisors) && data.supervisors.length > 0) {
         state.supervisors = data.supervisors.map(sup => ({
@@ -393,14 +400,14 @@ window.loadFromFirebase = async function() {
       state.todayDate = todayKey;
     }
     // Load full history
-    const histSnap = await getDocs(collection(db, 'historial'));
+    const histSnap = await db.collection('historial').get();
     state.history = [];
     histSnap.forEach(d => state.history.push(d.data()));
     state.history.sort((a,b) => a.date < b.date ? -1 : 1);
     // Load per-supervisor history for model training
     state.supHistory = {};
     try {
-      const supHistSnap = await getDocs(collection(db, 'historial_sup'));
+      const supHistSnap = await db.collection('historial_sup').get();
       supHistSnap.forEach(d => {
         const data = d.data();
         state.supHistory[data.name] = data.days || [];
@@ -421,8 +428,8 @@ window.loadFromFirebase = async function() {
   }
 };
 
-// Start loading
-window.loadFromFirebase();
+// Firebase ready — will be called after all code loads
+window._pendingFirebaseLoad = true;
 </script>
 <script>
 // ═══════════════════════════════════════
@@ -466,7 +473,7 @@ const state={
     {name:'Supervisor 2',sales:Array(8).fill(''),liners:[{name:'Liner D'},{name:'Liner E'}]}
   ],
   history:[],        // [{date,closedAt,supervisors:[{name,total,meta,projected,hourly,accuracy}]}]
-  supHistory:{}      // {supervisorName: [{date,total,meta,projected,hourly,accuracy}]} — per-supervisor model training data
+  supHistory:{},     // {supervisorName: [{date,total,meta,projected,hourly,accuracy}]} — per-supervisor model training data
   todayClosed:false, // flag: day already closed today
   todayDate:'',      // YYYY-MM-DD of the current day data
   testMode:false     // if true, data won't be saved to history or train the model
@@ -1376,7 +1383,10 @@ function setDate(){
 // INIT
 // ═══════════════════════════════════════
 // Firebase loads async — fallback to local if offline
-if(!window._fbReady) {
+initFirebase();
+if(window._fbReady) {
+  window.loadFromFirebase();
+} else {
   loadStateLocal();
   renderSupArea();
   setDate();
