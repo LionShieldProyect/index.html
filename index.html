@@ -1132,10 +1132,22 @@ function generarReporte(){
     +'</div>'
     +'</body></html>';
 
-  const win=window.open('','_blank');
-  win.document.write(html);
-  win.document.close();
-  // No auto-print — el usuario ve el reporte y decide
+  // Inyectar en iframe oculto y abrir ventana de impresión
+  let iframe=document.getElementById('_report_iframe');
+  if(iframe) iframe.remove();
+  iframe=document.createElement('iframe');
+  iframe.id='_report_iframe';
+  iframe.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;border:none;z-index:9999;background:#fff';
+  document.body.appendChild(iframe);
+  iframe.contentDocument.open();
+  iframe.contentDocument.write(html);
+  iframe.contentDocument.close();
+  // Botón cerrar dentro del iframe
+  const closeBtn=iframe.contentDocument.createElement('button');
+  closeBtn.textContent='✕ Cerrar reporte';
+  closeBtn.style.cssText='position:fixed;top:16px;right:16px;background:#111;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:13px;font-weight:700;cursor:pointer;z-index:99999;font-family:sans-serif';
+  closeBtn.onclick=()=>iframe.remove();
+  iframe.contentDocument.body.appendChild(closeBtn);
 }
 
 
