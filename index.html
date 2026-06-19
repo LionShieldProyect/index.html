@@ -383,9 +383,8 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
     <button id="test-mode-btn" onclick="toggleTestMode()">
       <i class="ti ti-flask"></i> Modo prueba
     </button>
-    <span id="close-hint" style="font-size:10px;color:var(--text4);font-weight:500"></span>
-    <button id="close-day-btn" onclick="closeDayAndSave()">
-      <i class="ti ti-device-floppy"></i> Cerrar día
+    <button onclick="generarReporte()" style="display:flex;align-items:center;gap:6px;border:1px solid var(--green);border-radius:var(--r);padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;transition:all 0.2s;background:var(--green);color:#fff" onmouseover="this.style.opacity='.85'" onmouseout="this.style.opacity='1'">
+      <i class="ti ti-file-download"></i> Descargar reporte
     </button>
   </div>
 </div>
@@ -478,9 +477,9 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
 // ═══════════════════════════════════════
 // CONSTANTS & STATE
 // ═══════════════════════════════════════
-const HOURS=['11am','12pm','1pm','2pm','4pm','5pm','6pm','7pm'];
-const TOTAL_WORK_HOURS=8,META_PER_LINER=3;
-const SHIFT_START=10,SHIFT_END=19;
+const HOURS=['10am','11am','12pm','1pm','2pm','4pm','5pm','6pm','7pm'];
+const TOTAL_WORK_HOURS=9,META_PER_LINER=10;
+const SHIFT_START=9,SHIFT_END=19;
 const STORAGE_KEY='novacard_v6'; // mismo key para no perder datos existentes
 
 const SUP_PALETTE=[
@@ -496,8 +495,8 @@ function supBg(si){return SUP_PALETTE[si%SUP_PALETTE.length].bg;}
 
 const state={
   supervisors:[
-    {name:'Supervisor 1',sales:Array(8).fill(''),liners:[{name:'Liner A'},{name:'Liner B'},{name:'Liner C'}]},
-    {name:'Supervisor 2',sales:Array(8).fill(''),liners:[{name:'Liner D'},{name:'Liner E'}]}
+    {name:'Supervisor 1',sales:Array(9).fill(''),liners:[{name:'Liner A'},{name:'Liner B'},{name:'Liner C'}]},
+    {name:'Supervisor 2',sales:Array(9).fill(''),liners:[{name:'Liner D'},{name:'Liner E'}]}
   ],
   history:[],supHistory:{},
   todayClosed:false,todayDate:'',testMode:false
@@ -561,7 +560,7 @@ async function loadFromFirebase(){
     if(td.exists){
       const data=td.data();
       if(data.supervisors&&Array.isArray(data.supervisors)&&data.supervisors.length>0){
-        state.supervisors=data.supervisors.map(s=>({name:s.name||'Supervisor',sales:Array.isArray(s.sales)?s.sales.slice(0,8).map(v=>v===null||v===undefined?'':v):Array(8).fill(''),liners:Array.isArray(s.liners)&&s.liners.length>0?s.liners:[{name:'Liner 1'}]}));
+        state.supervisors=data.supervisors.map(s=>({name:s.name||'Supervisor',sales:Array.isArray(s.sales)?s.sales.slice(0,9).map(v=>v===null||v===undefined?'':v):Array(9).fill(''),liners:Array.isArray(s.liners)&&s.liners.length>0?s.liners:[{name:'Liner 1'}]}));
         state.todayClosed=data.todayClosed||false;state.todayDate=data.todayDate||'';
       }
     }
@@ -587,7 +586,7 @@ function loadStateLocal(){
   try{
     const raw=localStorage.getItem(STORAGE_KEY);if(!raw)return;
     const s=JSON.parse(raw);if(!s||!Array.isArray(s.supervisors)||s.supervisors.length<1)return;
-    state.supervisors=s.supervisors.map(sup=>({name:typeof sup.name==='string'&&sup.name.trim()?sup.name:'Supervisor',sales:Array.isArray(sup.sales)?sup.sales.slice(0,8).map(v=>(v===null||v===undefined)?'':v):Array(8).fill(''),liners:Array.isArray(sup.liners)&&sup.liners.length>0?sup.liners.map(l=>({name:typeof l.name==='string'?l.name:'Liner'})):[{name:'Liner A'}]}));
+    state.supervisors=s.supervisors.map(sup=>({name:typeof sup.name==='string'&&sup.name.trim()?sup.name:'Supervisor',sales:Array.isArray(sup.sales)?sup.sales.slice(0,9).map(v=>(v===null||v===undefined)?'':v):Array(9).fill(''),liners:Array.isArray(sup.liners)&&sup.liners.length>0?sup.liners.map(l=>({name:typeof l.name==='string'?l.name:'Liner'})):[{name:'Liner A'}]}));
     if(Array.isArray(s.history))state.history=s.history;
     if(typeof s.todayClosed==='boolean')state.todayClosed=s.todayClosed;
     if(typeof s.todayDate==='string')state.todayDate=s.todayDate;
@@ -649,25 +648,20 @@ function projectEnd(sup,si){
 // ═══════════════════════════════════════
 // CLOSE DAY BUTTON
 // ═══════════════════════════════════════
-function updateCloseDayBtn(){
-  const btn=document.getElementById('close-day-btn'),hint=document.getElementById('close-hint'),now=new Date(),hour=now.getHours(),hasData=state.supervisors.some(s=>hoursLogged(s)>0);
-  if(state.todayClosed){btn.className='done';btn.innerHTML='<i class="ti ti-circle-check"></i> Día cerrado';hint.textContent='Guardado en la nube';return;}
-  if(hour>=SHIFT_END&&hasData){btn.className='ready';btn.innerHTML='<i class="ti ti-device-floppy"></i> Cerrar día';hint.textContent='¡Turno terminado!';}
-  else if(hour>=SHIFT_START&&hasData){btn.className='';btn.style.cssText='display:flex;align-items:center;gap:6px;border:1px solid var(--border2);border-radius:var(--r);padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;font-family:Plus Jakarta Sans,sans-serif;transition:all .25s;background:var(--bg3);color:var(--text3);pointer-events:auto';btn.innerHTML='<i class="ti ti-device-floppy"></i> Cerrar día';hint.textContent='Turno termina a las 7pm';}
-  else{btn.className='';btn.style.cssText='display:flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:var(--r);padding:7px 14px;font-size:12px;font-weight:700;font-family:Plus Jakarta Sans,sans-serif;transition:all .25s;background:var(--bg3);color:var(--text4);pointer-events:none';btn.innerHTML='<i class="ti ti-device-floppy"></i> Cerrar día';hint.textContent=hasData?'':'Sin datos aún';}
-}
 
-function closeDayAndSave(){
+function closeDayAndSave(auto=false){
   const hasData=state.supervisors.some(s=>hoursLogged(s)>0);
-  if(!hasData){showToast('Sin datos para guardar');return;}if(state.todayClosed){showToast('El día ya fue cerrado');return;}
-  if(!confirm('¿Cerrar el día y entrenar el modelo con los resultados reales?'))return;
+  if(!hasData){if(!auto)showToast('Sin datos para guardar');return;}
+  if(state.todayClosed){if(!auto)showToast('El día ya fue cerrado');return;}
+  if(!auto&&!confirm('¿Cerrar el día y entrenar el modelo con los resultados reales?'))return;
   const today=new Date().toLocaleDateString('es-MX',{year:'numeric',month:'2-digit',day:'2-digit'});
   const entry={date:today,closedAt:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),supervisors:state.supervisors.map((sup,si)=>{const proj=projectEnd(sup,si),real=supTotal(sup),accuracy=proj&&proj>0?Math.min(100,Math.round((1-Math.abs(real-proj)/Math.max(real,proj))*100)):null;return{name:sup.name,total:real,meta:supMeta(si),projected:proj,hourly:hourlyVal(sup),accuracy};})};
   const idx=state.history.findIndex(d=>d.date===today);if(idx>=0)state.history[idx]=entry;else state.history.push(entry);
   if(state.testMode){showToast('⚗️ Modo prueba — NO guardado en historial');return;}
-  state.todayClosed=true;state.todayDate=getTodayKey();saveState();saveHistoryDay(entry);updateCloseDayBtn();
+  state.todayClosed=true;state.todayDate=getTodayKey();saveState();saveHistoryDay(entry);
   const avgAcc=entry.supervisors.filter(s=>s.accuracy!=null).map(s=>s.accuracy);
-  showToast(`✓ Día cerrado.${avgAcc.length>0?' Precisión: '+Math.round(avgAcc.reduce((a,b)=>a+b,0)/avgAcc.length)+'%':''} Historial: ${state.history.length} días`);
+  const accStr=avgAcc.length>0?' Precisión: '+Math.round(avgAcc.reduce((a,b)=>a+b,0)/avgAcc.length)+'%':'';
+  showToast(`${auto?'🕗 Cierre automático':'✓ Día cerrado'}.${accStr} Historial: ${state.history.length} días`);
   renderKPIs();
 }
 
@@ -679,7 +673,7 @@ function checkWeekend(){
   document.getElementById('weekend-banner').style.display='block';
   ['tab-ventas','tab-grafica','tab-historico','tab-liners'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
   document.querySelector('.nav-tabs').style.opacity='0.3';document.querySelector('.nav-tabs').style.pointerEvents='none';
-  document.getElementById('close-day-btn').style.display='none';document.getElementById('test-mode-btn').style.display='none';
+  document.getElementById('test-mode-btn').style.display='none';
 }
 
 // ═══════════════════════════════════════
@@ -719,7 +713,7 @@ function renderKPIs(){
   const avgAcc=allAcc.length>0?Math.round(allAcc.reduce((a,b)=>a+b,0)/allAcc.length):null;
   document.getElementById('kpi-area').innerHTML=`
     <div class="kpi-card kpi-green"><div class="k-eyebrow">Total acumulado</div><div class="k-val">${gT}</div><div class="k-sub">${pct}% de meta del día</div></div>
-    <div class="kpi-card kpi-red"><div class="k-eyebrow">Meta total</div><div class="k-val">${gM}</div><div class="k-sub">${gL} liners × 3 ventas</div></div>
+    <div class="kpi-card kpi-red"><div class="k-eyebrow">Meta total</div><div class="k-val">${gM}</div><div class="k-sub">${gL} liners × 10 ventas</div></div>
     <div class="kpi-card kpi-blue"><div class="k-eyebrow">Proyección al cierre</div><div class="k-val">${vP>0?gP:'—'}</div><div class="k-sub">${vP>0?Math.round(gP/gM*100)+'% de meta'+(state.history.length>0?' · '+state.history.length+' día(s)':''):'Sin datos aún'}</div></div>
     <div class="kpi-card kpi-amber"><div class="k-eyebrow">Precisión del modelo</div><div class="k-val">${avgAcc!=null?avgAcc+'%':'—'}</div><div class="k-sub">promedio histórico</div></div>
   `;
@@ -729,7 +723,7 @@ function renderKPIs(){
 // RENDER SUPERVISORS
 // ═══════════════════════════════════════
 function renderSupArea(){
-  saveState();renderKPIs();updateCloseDayBtn();
+  saveState();renderKPIs();
   const area=document.getElementById('sup-area');area.innerHTML='';
   state.supervisors.forEach((sup,si)=>{
     const meta=supMeta(si),total=supTotal(sup),proj=projectEnd(sup,si),avg=avgPerHour(sup),pace=paceNeeded(sup,si),logged=hoursLogged(sup);
@@ -755,7 +749,7 @@ function renderSupArea(){
       <div class="sup-monogram" style="background:${supBg(si)};color:${supColor(si)}">${getInitials(sup.name)}</div>
       <div class="sup-info">
         <input class="sup-name-input" type="text" value="${sup.name.replace(/"/g,'&quot;')}" title="Clic para editar" oninput="state.supervisors[${si}].name=this.value;saveState()" onblur="renderSupArea()">
-        <div class="sup-meta-line">${sup.liners.length} liners · Meta: <b style="color:${supColor(si)}">${meta} ventas</b> · 10am–7pm · break 2–3pm</div>
+        <div class="sup-meta-line">${sup.liners.length} liners · Meta: <b style="color:${supColor(si)}">${meta} ventas</b> · 9am–7pm · break 2–3pm</div>
       </div>
       ${badge}
     </div>
@@ -769,7 +763,7 @@ function renderSupArea(){
       </div>
       <div class="progress-row"><span>Progreso del día</span><span style="color:${fillColor};font-weight:700">${progPct}%</span></div>
       <div class="progress-bg"><div class="progress-fill" style="width:${progPct}%;background:${fillColor};box-shadow:0 0 8px ${fillColor}40"></div></div>
-      <div class="hour-section-label">Ventas por hora &nbsp;·&nbsp; <span style="color:var(--amber)">Break: 2pm–3pm</span></div>
+      <div class="hour-section-label">Ventas por hora &nbsp;·&nbsp; <span style="color:var(--amber)">Break: 2pm–3pm · Primer reporte 10am (incluye 9–10am)</span></div>
       <div class="hour-grid">
         ${HOURS.map((h,hi)=>{const v=sup.sales[hi],hasVal=(()=>{const s=String(v).trim();return s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s);})(),numV=hasVal?Number(v):0,anom=hasVal&&hv.length>=3&&isAnomaly(numV,hMean,sd);return`<div class="hour-cell"><div class="hlabel">${h}</div><input type="number" min="0" value="${hasVal?numV:''}" placeholder="—" class="${hasVal?'has-val':''} ${anom?'anomaly':''}" oninput="state.supervisors[${si}].sales[${hi}]=(this.value===''?'':this.value);renderSupArea()"></div>`;}).join('')}
       </div>
@@ -858,10 +852,25 @@ function renderHistorico(){
   const area=document.getElementById('historico-area');
   if(state.history.length===0){area.innerHTML=`<div style="padding:60px;text-align:center;color:var(--text4);font-size:13px;font-weight:500"><div style="font-size:36px;margin-bottom:14px">📊</div>Sin historial aún.<br>Cierra el día al terminar el turno para construir el histórico.</div>`;return;}
   const sorted=[...state.history].reverse();
-  let html=`<div style="overflow-x:auto"><table class="hist-table"><thead><tr><th>Fecha</th><th>Cierre</th>${state.supervisors.map(s=>`<th>${s.name}: Real/Meta</th><th>Predicho</th><th>Precisión</th>`).join('')}<th>Total día</th></tr></thead><tbody>`;
-  sorted.forEach(d=>{const tr=d.supervisors.reduce((a,s)=>a+s.total,0),tm=d.supervisors.reduce((a,s)=>a+s.meta,0),pct=tm>0?Math.round(tr/tm*100):0,cls=pct>=100?'hb-ok':pct>=75?'hb-warn':'hb-bad';html+=`<tr><td style="font-weight:600">${d.date}</td><td style="color:var(--text4)">${d.closedAt||'—'}</td>`;d.supervisors.forEach(s=>{const acc=s.accuracy,ac=acc>=90?'var(--green)':acc>=70?'var(--amber)':'var(--red)';html+=`<td><b>${s.total}</b>/${s.meta}</td><td>${s.projected||'—'}</td><td>${acc!=null?`<span style="color:${ac};font-weight:700">${acc}%</span>`:'—'}</td>`;});html+=`<td><span class="hist-badge ${cls}">${tr}/${tm} (${pct}%)</span></td></tr>`;});
+  // Collect all unique supervisor names across all history for consistent columns
+  const allSupNames=[...new Set(sorted.flatMap(d=>d.supervisors.map(s=>s.name)))];
+  let html=`<div style="overflow-x:auto"><table class="hist-table"><thead><tr><th>Fecha</th><th>Cierre</th>${allSupNames.map(n=>`<th>${n}: Real/Meta</th><th>Predicho</th><th>Precisión</th>`).join('')}<th>Total día</th></tr></thead><tbody>`;
+  sorted.forEach(d=>{
+    const tr=d.supervisors.reduce((a,s)=>a+s.total,0),tm=d.supervisors.reduce((a,s)=>a+s.meta,0),pct=tm>0?Math.round(tr/tm*100):0,cls=pct>=100?'hb-ok':pct>=75?'hb-warn':'hb-bad';
+    html+=`<tr><td style="font-weight:600">${d.date}</td><td style="color:var(--text4)">${d.closedAt||'—'}</td>`;
+    allSupNames.forEach(name=>{
+      const s=d.supervisors.find(s=>s.name===name);
+      if(s){
+        const acc=s.accuracy,ac=acc>=90?'var(--green)':acc>=70?'var(--amber)':'var(--red)';
+        html+=`<td><b>${s.total}</b>/${s.meta}</td><td>${s.projected||'—'}</td><td>${acc!=null?`<span style="color:${ac};font-weight:700">${acc}%</span>`:'—'}</td>`;
+      }else{
+        html+=`<td style="color:var(--text4)">—</td><td style="color:var(--text4)">—</td><td style="color:var(--text4)">—</td>`;
+      }
+    });
+    html+=`<td><span class="hist-badge ${cls}">${tr}/${tm} (${pct}%)</span></td></tr>`;
+  });
   html+=`</tbody></table></div>`;
-  const allAcc=state.history.flatMap(d=>d.supervisors.map(s=>s.accuracy).filter(Boolean)),avgA=allAcc.length>0?Math.round(allAcc.reduce((a,b)=>a+b,0)/allAcc.length):null;
+  const allAcc=state.history.flatMap(d=>d.supervisors.map(s=>s.accuracy).filter(v=>v!=null)),avgA=allAcc.length>0?Math.round(allAcc.reduce((a,b)=>a+b,0)/allAcc.length):null;
   html+=`<div style="margin-top:14px;padding:14px 18px;background:var(--bg3);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:var(--r-lg);font-size:12px;color:var(--text2);font-weight:500"><b style="color:var(--green)">Estado del modelo:</b> ${state.history.length} día(s) de entrenamiento · Precisión promedio: <b>${avgA!=null?avgA+'%':'—'}</b>${state.history.length<5?' · <span style="color:var(--text4)">Se recomiendan 5+ días para calibración óptima</span>':''}</div>`;
   area.innerHTML=html;
 }
@@ -897,14 +906,239 @@ function showTab(t){
 // ═══════════════════════════════════════
 function setDate(){const d=document.getElementById('date-line');if(d)d.textContent=new Date().toLocaleDateString('es-MX',{weekday:'long',year:'numeric',month:'long',day:'numeric'});}
 function updateClock(){
-  const now=new Date();document.getElementById('clock-live').textContent=now.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  if(now.getHours()===SHIFT_START&&now.getMinutes()===0&&now.getSeconds()===0){const tk=getTodayKey();if(state.todayDate!==tk){state.supervisors.forEach(sup=>{sup.sales=Array(8).fill('');});state.todayClosed=false;state.todayDate=tk;saveState();renderSupArea();showToast('🌅 Nuevo turno — 10am–7pm');}}
-  updateCloseDayBtn();
+  const now=new Date();
+  document.getElementById('clock-live').textContent=now.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const h=now.getHours(),m=now.getMinutes(),s=now.getSeconds();
+  // Auto-reset a las 9am
+  if(h===SHIFT_START&&m===0&&s===0){
+    const tk=getTodayKey();
+    if(state.todayDate!==tk){
+      state.supervisors.forEach(sup=>{sup.sales=Array(9).fill('');});
+      state.todayClosed=false;state.todayDate=tk;saveState();renderSupArea();
+      showToast('🌅 Nuevo turno — 9am–7pm');
+    }
+  }
+  // Cierre automático a las 8pm
+  if(h===20&&m===0&&s===0){
+    const hasData=state.supervisors.some(sup=>hoursLogged(sup)>0);
+    if(hasData&&!state.todayClosed&&!state.testMode) closeDayAndSave(true);
+  }
 }
 
 // ═══════════════════════════════════════
 // INIT — Firebase carga ANTES de render
 // ═══════════════════════════════════════
+// ═══════════════════════════════════════
+// ═══════════════════════════════════════
+// REPORTE PDF — Diseño ejecutivo
+// ═══════════════════════════════════════
+function generarReporte(){
+  const now=new Date();
+  const fechaStr=now.toLocaleDateString('es-MX',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
+  const horaStr=now.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+  const esFinal=now.getHours()>=19;
+
+  const supData=state.supervisors.map((sup,si)=>{
+    const meta=supMeta(si),total=supTotal(sup),proj=projectEnd(sup,si),avg=avgPerHour(sup),pace=paceNeeded(sup,si),logged=hoursLogged(sup);
+    const pct=meta>0?Math.round(total/meta*100):0;
+    const projPct=proj!=null&&meta>0?Math.round(proj/meta*100):null;
+    const reg=adjustedReg(sup,si);
+    const hv=sup.sales.map(v=>{const s=String(v).trim();return(s!==''&&!isNaN(s))?Number(s):null;}).filter(v=>v!==null);
+    const sd=hv.length>=2?stdDev(hv):0;
+    const cvVal=hv.length>=2?cv(hv):null;
+    const hMean=hv.length>0?hv.reduce((a,b)=>a+b,0)/hv.length:0;
+    const anomalies=hv.map((v,i)=>isAnomaly(v,hMean,sd)?HOURS[i]:null).filter(Boolean);
+    const pd=state.history.filter(d=>d.supervisors&&d.supervisors.find(s=>s.name===sup.name));
+    const avgHistTotal=pd.length>0?Math.round(pd.reduce((a,d)=>{const s=d.supervisors.find(s=>s.name===sup.name);return a+(s?s.total:0);},0)/pd.length):null;
+    const pdAcc=pd.filter(d=>{const s=d.supervisors.find(s=>s.name===sup.name);return s&&s.accuracy!=null;});
+    const avgAcc=pdAcc.length>0?Math.round(pdAcc.reduce((a,d)=>{const s=d.supervisors.find(s=>s.name===sup.name);return a+(s?s.accuracy:0);},0)/pdAcc.length):null;
+    const trend=reg?(reg.slope>0.15?'Creciente':reg.slope<-0.15?'Decreciente':'Estable'):'—';
+    const trendIcon=reg?(reg.slope>0.15?'▲':reg.slope<-0.15?'▼':'→'):'→';
+    const status=projPct==null?'neutral':projPct>=100?'ok':projPct>=75?'warn':'bad';
+    const deficit=pace!=null&&logged>0?Math.round(pace-avg):null;
+    return{sup,si,meta,total,proj,projPct,avg,pace,logged,pct,reg,sd,cvVal,anomalies,avgHistTotal,avgAcc,trend,trendIcon,status,hv,deficit};
+  });
+
+  const totalGlobal=supData.reduce((a,d)=>a+d.total,0);
+  const metaGlobal=supData.reduce((a,d)=>a+d.meta,0);
+  const projGlobal=supData.filter(d=>d.proj!=null).reduce((a,d)=>a+(d.proj||0),0);
+  const pctGlobal=metaGlobal>0?Math.round(totalGlobal/metaGlobal*100):0;
+  const projPctGlobal=metaGlobal>0?Math.round(projGlobal/metaGlobal*100):0;
+  const totalLiners=supData.reduce((a,d)=>a+d.sup.liners.length,0);
+  const allAcc=state.history.flatMap(d=>d.supervisors.map(s=>s.accuracy).filter(v=>v!=null));
+  const modelAcc=allAcc.length>0?Math.round(allAcc.reduce((a,b)=>a+b,0)/allAcc.length):null;
+  const ranking=[...supData].sort((a,b)=>{
+    const ea=a.logged>0?a.total/(a.sup.liners.length||1)/a.logged:0;
+    const eb=b.logged>0?b.total/(b.sup.liners.length||1)/b.logged:0;
+    return eb-ea;
+  });
+
+  const sColor={ok:'#16a34a',warn:'#b45309',bad:'#dc2626',neutral:'#6b7280'};
+  const sLabel={ok:'En meta',warn:'Bajo ritmo',bad:'Crítico',neutral:'Sin datos'};
+  const sBg={ok:'#f0fdf4',warn:'#fffbeb',bad:'#fef2f2',neutral:'#f9fafb'};
+
+  function kpiCard(label,val,sub,col){
+    return '<div style="border:1px solid #e5e5e5;border-top:3px solid '+col+';border-radius:8px;padding:14px 16px">'
+      +'<div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;font-weight:600">'+label+'</div>'
+      +'<div style="font-size:26px;font-weight:800;color:'+col+';line-height:1">'+val+'</div>'
+      +'<div style="font-size:10px;color:#555;margin-top:6px">'+sub+'</div>'
+      +'</div>';
+  }
+
+  function metricBox(label,val,sub){
+    return '<div style="background:#f9f9f9;border:1px solid #e5e5e5;border-radius:8px;padding:10px 12px">'
+      +'<div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:5px;font-weight:600">'+label+'</div>'
+      +'<div style="font-size:18px;font-weight:800;color:#111;line-height:1">'+val+'</div>'
+      +'<div style="font-size:9px;color:#555;margin-top:4px">'+sub+'</div>'
+      +'</div>';
+  }
+
+  function statBox(label,val,danger){
+    return '<div style="background:#f9f9f9;border:1px solid #e5e5e5;border-radius:6px;padding:7px 10px;font-size:10px">'
+      +'<span style="color:#555">'+label+':</span> '
+      +'<b style="color:'+(danger?'#dc2626':'#111')+'">'+val+'</b>'
+      +'</div>';
+  }
+
+  // Tabla de ventas por hora
+  let horaTabla='<table style="width:100%;border-collapse:collapse;font-size:10px">'
+    +'<thead><tr style="background:#f5f5f5">'
+    +'<th style="padding:5px 8px;text-align:left;font-weight:700;color:#555;border:1px solid #e5e5e5">Supervisor</th>';
+  HOURS.forEach(h=>{horaTabla+='<th style="padding:5px 6px;text-align:center;font-weight:700;color:#555;border:1px solid #e5e5e5">'+h+'</th>';});
+  horaTabla+='<th style="padding:5px 8px;text-align:center;font-weight:700;color:#555;border:1px solid #e5e5e5">Total</th></tr></thead><tbody>';
+  supData.forEach(d=>{
+    const maxVal=d.hv.length>0?Math.max(...d.hv):0;
+    horaTabla+='<tr><td style="padding:5px 8px;font-weight:600;color:#111;border:1px solid #e5e5e5">'+d.sup.name+'</td>';
+    HOURS.forEach((_,hi)=>{
+      const v=d.sup.sales[hi],s=String(v).trim(),val=(s!==''&&!isNaN(s))?Number(s):null,best=val!=null&&val===maxVal&&maxVal>0;
+      horaTabla+='<td style="padding:5px 6px;text-align:center;border:1px solid #e5e5e5;background:'+(val!=null?(best?'#fff7ed':'#fafafa'):'#f9f9f9')+';color:'+(val!=null?(best?'#ea580c':'#111'):'#ccc')+';font-weight:'+(best?'800':'500')+'">'+(val!=null?val:'—')+'</td>';
+    });
+    horaTabla+='<td style="padding:5px 8px;text-align:center;font-weight:800;color:'+sColor[d.status]+';border:1px solid #e5e5e5;background:'+sBg[d.status]+'">'+d.total+'</td></tr>';
+  });
+  horaTabla+='</tbody></table>';
+
+  // Detalle por supervisor
+  let supRows='';
+  supData.forEach((d,idx)=>{
+    const col=sColor[d.status],bg=sBg[d.status];
+    const initials=d.sup.name.trim().split(/\s+/).map(w=>w[0]||'').join('').toUpperCase().slice(0,2)||'??';
+    const rec=d.status==='bad'?'Intervención inmediata. Necesita '+(d.pace||'—')+' ventas/hora. Revisar técnica de cierre y actividad de liners.'
+      :d.status==='warn'?'Ritmo bajo. Debe mantener '+(d.pace||'—')+' ventas/hora. Monitorear de cerca.'
+      :d.status==='ok'?'Buen desempeño. Mantener ritmo de '+d.avg.toFixed(1)+' ventas/hora.'
+      :'Sin suficientes datos para generar recomendación.';
+    const defStr=d.deficit!=null?(d.deficit<=0?'✓ Al ritmo':'+'+d.deficit+' brecha'):'—';
+    supRows+='<div style="margin-bottom:20px;page-break-inside:avoid">';
+    supRows+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">';
+    supRows+='<div style="display:flex;align-items:center;gap:10px">';
+    supRows+='<div style="width:34px;height:34px;border-radius:8px;background:#fff7ed;border:1.5px solid #fed7aa;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;color:#ea580c">'+initials+'</div>';
+    supRows+='<div><div style="font-size:14px;font-weight:800;color:#111">'+d.sup.name+'</div><div style="font-size:10px;color:#555">'+d.sup.liners.length+' liners</div></div></div>';
+    supRows+='<span style="background:'+bg+';border:1px solid '+col+'55;border-radius:100px;padding:4px 14px;font-size:10px;font-weight:800;color:'+col+';text-transform:uppercase;letter-spacing:0.05em">'+sLabel[d.status]+'</span></div>';
+    supRows+='<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px">';
+    supRows+=metricBox('Meta',d.meta,'ventas objetivo');
+    supRows+=metricBox('Acumulado',d.total,d.pct+'% de meta');
+    supRows+=metricBox('Proyección',d.proj!=null?d.proj:'—',d.projPct!=null?d.projPct+'% meta':'—');
+    supRows+=metricBox('Prom/hora',d.logged>0?d.avg.toFixed(1):'—','ventas por hora');
+    supRows+=metricBox('Req/hora',d.pace!=null&&d.pace>0?d.pace:'—',defStr);
+    supRows+='</div>';
+    supRows+='<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px">';
+    supRows+=statBox('Tendencia',d.trendIcon+' '+d.trend,false);
+    supRows+=statBox('Variabilidad',d.cvVal!=null?d.cvVal.toFixed(0)+'% — '+(d.cvVal<20?'Consistente':d.cvVal<40?'Moderada':'Irregular'):'—',d.cvVal!=null&&d.cvVal>=40);
+    supRows+=statBox('Anomalías',d.anomalies.length?d.anomalies.join(', '):'Ninguna',d.anomalies.length>0);
+    supRows+=statBox('Prom. histórico',d.avgHistTotal!=null?d.avgHistTotal+' ventas':'Sin historial',false);
+    supRows+=statBox('Precisión modelo',d.avgAcc!=null?d.avgAcc+'%':'Sin datos',false);
+    supRows+=statBox('Días historial',state.history.filter(d2=>d2.supervisors.find(s=>s.name===d.sup.name)).length,false);
+    supRows+='</div>';
+    supRows+='<div style="background:'+bg+';border-left:3px solid '+col+';padding:9px 14px;border-radius:0 6px 6px 0;font-size:11px;color:#333;line-height:1.6">';
+    supRows+='<b style="color:'+col+'">Recomendación:</b> '+rec+'</div>';
+    if(idx<supData.length-1) supRows+='<hr style="border:none;border-top:1px solid #e5e5e5;margin:20px 0">';
+    supRows+='</div>';
+  });
+
+  // Ranking
+  let rankRows='';
+  ranking.forEach((d,i)=>{
+    const medal=['🥇','🥈','🥉'][i]||(i+1)+'.';
+    const eff=d.logged>0?(d.total/(d.sup.liners.length||1)/d.logged).toFixed(2):'0.00';
+    rankRows+='<tr style="border-bottom:1px solid #e5e5e5">'
+      +'<td style="padding:7px 8px;font-size:16px">'+medal+'</td>'
+      +'<td style="padding:7px 8px;font-weight:700;font-size:12px">'+d.sup.name+'</td>'
+      +'<td style="padding:7px 8px;text-align:center;font-size:12px">'+d.total+'</td>'
+      +'<td style="padding:7px 8px;text-align:center;font-size:12px">'+d.sup.liners.length+'</td>'
+      +'<td style="padding:7px 8px;text-align:center;font-weight:800;color:#ea580c;font-size:12px">'+eff+'</td>'
+      +'<td style="padding:7px 8px;text-align:center"><span style="background:'+sBg[d.status]+';color:'+sColor[d.status]+';border-radius:100px;padding:2px 10px;font-size:9px;font-weight:700;text-transform:uppercase">'+sLabel[d.status]+'</span></td>'
+      +'</tr>';
+  });
+
+  const progColor=pctGlobal>=100?'#16a34a':pctGlobal>=75?'#b45309':'#dc2626';
+
+  const html='<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'
+    +'<title>Reporte PlataCard</title>'
+    +'<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">'
+    +'<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:"Plus Jakarta Sans",Arial,sans-serif;background:#fff;color:#111;padding:40px;max-width:860px;margin:0 auto;line-height:1.5}@media print{body{padding:20px}.no-print{display:none!important}@page{margin:1.5cm;size:A4}}</style>'
+    +'</head><body>'
+
+    // Header
+    +'<div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:18px;border-bottom:2px solid #111;margin-bottom:24px">'
+    +'<div><div style="font-size:26px;font-weight:800;letter-spacing:-0.03em">PlataCard</div>'
+    +'<div style="font-size:11px;color:#444;margin-top:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em">Reporte de desempeño · '+(esFinal?'Cierre del día':'Corte parcial')+'</div></div>'
+    +'<div style="text-align:right"><div style="font-size:13px;font-weight:700;text-transform:capitalize">'+fechaStr+'</div>'
+    +'<div style="font-size:11px;color:#444;margin-top:3px">Generado '+horaStr+'</div></div></div>'
+
+    // KPIs
+    +'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">'
+    +kpiCard('Total acumulado',totalGlobal,pctGlobal+'% de meta','#ea580c')
+    +kpiCard('Meta del día',metaGlobal,totalLiners+' liners × 10','#dc2626')
+    +kpiCard('Proyección',projGlobal,projPctGlobal+'% de meta','#2563eb')
+    +kpiCard('Precisión modelo',modelAcc!=null?modelAcc+'%':'—',state.history.length+' días entrenado','#d97706')
+    +'</div>'
+
+    // Progreso global
+    +'<div style="margin-bottom:24px;padding:14px 18px;background:#f9f9f9;border:1px solid #e5e5e5;border-radius:8px">'
+    +'<div style="display:flex;justify-content:space-between;font-size:10px;font-weight:700;color:#444;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px">'
+    +'<span>Progreso global</span><span style="color:'+progColor+'">'+pctGlobal+'%</span></div>'
+    +'<div style="background:#e5e5e5;border-radius:99px;height:7px"><div style="width:'+Math.min(100,pctGlobal)+'%;height:7px;border-radius:99px;background:'+progColor+'"></div></div>'
+    +'<div style="font-size:11px;color:#555;margin-top:8px">'+totalGlobal+' de '+metaGlobal+' ventas · Faltan '+Math.max(0,metaGlobal-totalGlobal)+' · '+(esFinal?'Turno finalizado':'En curso')+'</div>'
+    +'</div>'
+
+    // Ventas por hora
+    +'<div style="margin-bottom:24px">'
+    +'<div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:#444;margin-bottom:10px">Ventas por hora</div>'
+    +horaTabla+'</div>'
+
+    // Detalle por supervisor
+    +'<div style="margin-bottom:24px">'
+    +'<div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:#444;margin-bottom:16px">Análisis por supervisor</div>'
+    +supRows+'</div>'
+
+    // Ranking
+    +'<div style="margin-bottom:24px">'
+    +'<div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:0.08em;color:#444;margin-bottom:10px">Ranking de eficiencia</div>'
+    +'<table style="width:100%;border-collapse:collapse">'
+    +'<thead><tr style="background:#f5f5f5;border-bottom:1px solid #e5e5e5">'
+    +'<th style="padding:7px 8px;font-size:9px;font-weight:700;color:#444;text-transform:uppercase"></th>'
+    +'<th style="padding:7px 8px;font-size:9px;font-weight:700;color:#444;text-transform:uppercase;text-align:left">Supervisor</th>'
+    +'<th style="padding:7px 8px;font-size:9px;font-weight:700;color:#444;text-transform:uppercase;text-align:center">Ventas</th>'
+    +'<th style="padding:7px 8px;font-size:9px;font-weight:700;color:#444;text-transform:uppercase;text-align:center">Liners</th>'
+    +'<th style="padding:7px 8px;font-size:9px;font-weight:700;color:#444;text-transform:uppercase;text-align:center">Eficiencia</th>'
+    +'<th style="padding:7px 8px;font-size:9px;font-weight:700;color:#444;text-transform:uppercase;text-align:center">Estado</th>'
+    +'</tr></thead><tbody>'+rankRows+'</tbody></table></div>'
+
+    // Footer
+    +'<div style="border-top:1px solid #e5e5e5;padding-top:12px;display:flex;justify-content:space-between;font-size:10px;color:#666">'
+    +'<span>PlataCard Sales Intelligence</span><span>'+fechaStr+' · '+horaStr+'</span></div>'
+
+    +'<div class="no-print" style="text-align:center;margin-top:28px">'
+    +'<button onclick="window.print()" style="background:#ea580c;color:#fff;border:none;border-radius:8px;padding:12px 32px;font-size:14px;font-weight:700;cursor:pointer">Guardar como PDF</button>'
+    +'</div>'
+    +'</body></html>';
+
+  const win=window.open('','_blank');
+  win.document.write(html);
+  win.document.close();
+  // No auto-print — el usuario ve el reporte y decide
+}
+
+
 async function init(){
   loadStateLocal(); // carga local primero (instantáneo)
   renderSupArea();setDate();updateClock();
