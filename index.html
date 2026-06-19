@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PlataCard — Sales Intelligence</title>
+<title>Betel — Sales Intelligence</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
@@ -360,7 +360,7 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
 <!-- MASTHEAD -->
 <div class="masthead">
   <div class="mast-left">
-    <div class="mast-logo">PlataCard<span class="dot"></span></div>
+    <div class="mast-logo">Betel<span class="dot"></span></div>
     <div class="mast-sep"></div>
     <div class="mast-sub">Sales Intelligence</div>
   </div>
@@ -423,7 +423,7 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
         <div class="chart-legend" id="legend-bar"></div>
       </div>
       <div class="chart-card">
-        <div class="chart-eyebrow"><i class="ti ti-trophy" style="margin-right:4px"></i>Eficiencia (ventas / liner / hora)</div>
+        <div class="chart-eyebrow"><i class="ti ti-trophy" style="margin-right:4px"></i>% de meta alcanzado por hora (acumulado)</div>
         <div class="chart-wrap"><canvas id="chart-efficiency"></canvas></div>
         <div class="chart-legend" id="legend-efficiency"></div>
         <div style="height:1px;background:var(--border);margin:14px 0"></div>
@@ -478,7 +478,14 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
 // CONSTANTS & STATE
 // ═══════════════════════════════════════
 const HOURS=['10am','11am','12pm','1pm','2pm','4pm','5pm','6pm','7pm'];
-const TOTAL_WORK_HOURS=9,META_PER_LINER=10;
+const TOTAL_WORK_HOURS=9;
+// Meta por liner según campaña del supervisor (identificado por nombre)
+const META_POR_SUPERVISOR={
+  "PIÑON":3,    // Novacard — 3 ventas/liner
+  "ROY":10,     // Plata — 10 ventas/liner
+  "MARIO":10    // Plata — 10 ventas/liner
+};
+const META_DEFAULT=10; // default para supervisores no listados
 const SHIFT_START=9,SHIFT_END=19;
 const STORAGE_KEY='novacard_v6'; // mismo key para no perder datos existentes
 
@@ -546,7 +553,7 @@ async function saveHistoryDay(entry){
       const ref=_db.collection('historial_sup').doc(supKey);
       const ex=await ref.get();const days=ex.exists?(ex.data().days||[]):[];
       const idx=days.findIndex(d=>d.date===entry.date);
-      const rec={date:entry.date,total:sup.total,meta:sup.meta,projected:sup.projected,hourly:sup.hourly,accuracy:sup.accuracy};
+      const rec={date:entry.date,total:sup.total,meta:sup.meta,liners:sup.liners,metaPerLiner:sup.metaPerLiner,projected:sup.projected,hourly:sup.hourly,accuracy:sup.accuracy};
       if(idx>=0)days[idx]=rec;else days.push(rec);
       await ref.set({name:sup.name,days});
     }
@@ -571,6 +578,23 @@ async function loadFromFirebase(){
     state.history=[];hs.forEach(d=>state.history.push(d.data()));state.history.sort((a,b)=>a.date<b.date?-1:1);
     state.supHistory={};
     try{const ss=await _db.collection('historial_sup').get();ss.forEach(d=>{const dt=d.data();state.supHistory[dt.name]=dt.days||[];});}catch(e){}
+    // Migrar meta incorrecta de Piñon en historial (si fue guardada como 10 en vez de 3)
+    try{
+      state.history.forEach(d=>{
+        if(d.supervisors){
+          d.supervisors.forEach(s=>{
+            const name=(s.name||'').trim().toUpperCase();
+            if(name.includes('PI') && s.metaPerLiner!==3){
+              const correctMeta=s.liners?s.liners*3:s.meta; // recalcular con meta=3
+              s.meta=correctMeta;s.metaPerLiner=3;
+              if(s.projected&&s.accuracy!=null){
+                s.accuracy=Math.min(100,Math.round((1-Math.abs(s.total-s.projected)/Math.max(s.total,s.projected))*100));
+              }
+            }
+          });
+        }
+      });
+    }catch(e){}
     return true;
   }catch(e){console.warn('Firebase load error:',e);return false;}
 }
@@ -617,20 +641,45 @@ function linReg(xs,ys){
 }
 function adjustedReg(sup,si){
   const{xs,ys}=getXY(sup),reg=xs.length>=2?linReg(xs,ys):null;if(!reg)return null;
+  // Buscar historial siempre por nombre, nunca por índice
   const supDays=(state.supHistory&&state.supHistory[sup.name])||[];
-  const fallback=state.history.filter(d=>d.supervisors&&d.supervisors[si]&&d.supervisors[si].name===sup.name);
-  const past=supDays.length>0?supDays:fallback.map(d=>d.supervisors[si]);
+  const fallback=state.history
+    .map(d=>d.supervisors&&d.supervisors.find(s=>s.name===sup.name))
+    .filter(Boolean);
+  const past=supDays.length>0?supDays:fallback;
   if(past.length<2)return{...reg,corrected:false};
-  const errors=past.map(d=>(d&&d.projected&&d.total)?d.total-d.projected:null).filter(e=>e!==null);
+  // Calcular error usando la meta correcta del supervisor (por nombre)
+  const metaPerLiner=getMetaPerLiner(sup);
+  const errors=past.map(d=>{
+    if(!d||d.total==null)return null;
+    // Recalcular meta correcta si el historial la tenía incorrecta
+    const metaCorrecta=d.liners!=null?d.liners*metaPerLiner:(d.meta||null);
+    const proj=d.projected;
+    if(proj==null||proj===0)return null;
+    return d.total-proj;
+  }).filter(e=>e!==null);
   if(errors.length===0)return{...reg,corrected:false};
-  const avgError=errors.reduce((a,b)=>a+b,0)/errors.length,remaining=TOTAL_WORK_HOURS-xs.length,perHour=remaining>0?avgError/remaining:0;
+  const avgError=errors.reduce((a,b)=>a+b,0)/errors.length;
+  const remaining=TOTAL_WORK_HOURS-xs.length;
+  const perHour=remaining>0?avgError/remaining:0;
   return{...reg,intercept:reg.intercept+perHour,corrected:true,avgError:Math.round(avgError),daysUsed:errors.length};
 }
 function getXY(sup){const xs=[],ys=[];sup.sales.forEach((v,i)=>{const s=String(v).trim();if(s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s)){xs.push(i+1);ys.push(Number(s));}});return{xs,ys};}
 function hourlyVal(sup){return sup.sales.map(v=>{const s=String(v).trim();return(s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s))?Number(s):0;});}
 function supTotal(sup){return hourlyVal(sup).reduce((a,b)=>a+b,0);}
 function hoursLogged(sup){return sup.sales.filter(v=>{const s=String(v).trim();return s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s);}).length;}
-function supMeta(si){return state.supervisors[si].liners.length*META_PER_LINER;}
+function getMetaPerLiner(sup){
+  // Buscar por nombre exacto primero, luego por nombre parcial
+  const name=(sup.name||'').trim().toUpperCase();
+  for(const key of Object.keys(META_POR_SUPERVISOR)){
+    if(name.includes(key)) return META_POR_SUPERVISOR[key];
+  }
+  return META_DEFAULT;
+}
+function supMeta(si){
+  const sup=state.supervisors[si];
+  return sup.liners.length*getMetaPerLiner(sup);
+}
 function avgPerHour(sup){const h=hoursLogged(sup);return h>0?(supTotal(sup)/h):0;}
 function paceNeeded(sup,si){const rem=supMeta(si)-supTotal(sup),left=TOTAL_WORK_HOURS-hoursLogged(sup);return left>0?Math.ceil(rem/left):null;}
 function stdDev(arr){if(arr.length<2)return 0;const m=arr.reduce((a,b)=>a+b,0)/arr.length;return Math.sqrt(arr.reduce((a,v)=>a+Math.pow(v-m,2),0)/arr.length);}
@@ -655,7 +704,7 @@ function closeDayAndSave(auto=false){
   if(state.todayClosed){if(!auto)showToast('El día ya fue cerrado');return;}
   if(!auto&&!confirm('¿Cerrar el día y entrenar el modelo con los resultados reales?'))return;
   const today=new Date().toLocaleDateString('es-MX',{year:'numeric',month:'2-digit',day:'2-digit'});
-  const entry={date:today,closedAt:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),supervisors:state.supervisors.map((sup,si)=>{const proj=projectEnd(sup,si),real=supTotal(sup),accuracy=proj&&proj>0?Math.min(100,Math.round((1-Math.abs(real-proj)/Math.max(real,proj))*100)):null;return{name:sup.name,total:real,meta:supMeta(si),projected:proj,hourly:hourlyVal(sup),accuracy};})};
+  const entry={date:today,closedAt:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),supervisors:state.supervisors.map((sup,si)=>{const proj=projectEnd(sup,si),real=supTotal(sup),accuracy=proj&&proj>0?Math.min(100,Math.round((1-Math.abs(real-proj)/Math.max(real,proj))*100)):null;const mpl=getMetaPerLiner(sup);return{name:sup.name,total:real,meta:supMeta(si),liners:sup.liners.length,metaPerLiner:mpl,projected:proj,hourly:hourlyVal(sup),accuracy};})};
   const idx=state.history.findIndex(d=>d.date===today);if(idx>=0)state.history[idx]=entry;else state.history.push(entry);
   if(state.testMode){showToast('⚗️ Modo prueba — NO guardado en historial');return;}
   state.todayClosed=true;state.todayDate=getTodayKey();saveState();saveHistoryDay(entry);
@@ -694,7 +743,7 @@ function alertText(si){
   const sup=state.supervisors[si],meta=supMeta(si),total=supTotal(sup),proj=projectEnd(sup,si),avg=avgPerHour(sup).toFixed(1),pace=paceNeeded(sup,si),logged=hoursLogged(sup);
   if(logged===0)return null;
   const pct=proj!==null?Math.round(proj/meta*100):null;
-  const pd=state.history.filter(d=>d.supervisors&&d.supervisors[si]);
+  const pd=state.history.map(d=>d.supervisors&&d.supervisors.find(s=>s.name===sup.name)).filter(Boolean);
   const histNote=pd.length>=2?` Modelo calibrado con <b>${pd.length}</b> días.`:pd.length===1?' (1 día de historial)':'';
   if(pct===null)return{cls:'a-ok',icon:'ti-info-circle',txt:`Con ${logged} hora(s) lleva <b>${total}</b> ventas. Necesita ${meta-total} más para meta de ${meta}.`};
   if(pct>=100)return{cls:'a-ok',icon:'ti-circle-check',txt:`Buen ritmo. Proyección <b>${proj}</b> vs meta <b>${meta}</b> (${pct}%). Promedio <b>${avg}</b>/h.${proj-meta>0?' Supera meta por '+(proj-meta)+'.':''}${histNote}`};
@@ -713,7 +762,7 @@ function renderKPIs(){
   const avgAcc=allAcc.length>0?Math.round(allAcc.reduce((a,b)=>a+b,0)/allAcc.length):null;
   document.getElementById('kpi-area').innerHTML=`
     <div class="kpi-card kpi-green"><div class="k-eyebrow">Total acumulado</div><div class="k-val">${gT}</div><div class="k-sub">${pct}% de meta del día</div></div>
-    <div class="kpi-card kpi-red"><div class="k-eyebrow">Meta total</div><div class="k-val">${gM}</div><div class="k-sub">${gL} liners × 10 ventas</div></div>
+    <div class="kpi-card kpi-red"><div class="k-eyebrow">Meta total</div><div class="k-val">${gM}</div><div class="k-sub">${gL} liners (metas mixtas)</div></div>
     <div class="kpi-card kpi-blue"><div class="k-eyebrow">Proyección al cierre</div><div class="k-val">${vP>0?gP:'—'}</div><div class="k-sub">${vP>0?Math.round(gP/gM*100)+'% de meta'+(state.history.length>0?' · '+state.history.length+' día(s)':''):'Sin datos aún'}</div></div>
     <div class="kpi-card kpi-amber"><div class="k-eyebrow">Precisión del modelo</div><div class="k-val">${avgAcc!=null?avgAcc+'%':'—'}</div><div class="k-sub">promedio histórico</div></div>
   `;
@@ -732,12 +781,12 @@ function renderSupArea(){
     const hv=sup.sales.map(v=>{const s=String(v).trim();return(s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s))?Number(s):null;}).filter(v=>v!==null);
     const sd=hv.length>=2?stdDev(hv):0,cvVal=hv.length>=2?cv(hv):null,hMean=hv.length>0?hv.reduce((a,b)=>a+b,0)/hv.length:0;
     const fillColor=progPct>=100?'var(--green)':progPct>=75?'var(--amber)':'var(--red)';
-    const mvCls=si===0?'mv-green':'mv-blue';
+    const mvCls=getMetaPerLiner(sup)===3?'mv-amber':'mv-green';
     const projMvCls=proj!=null&&proj>=meta?'mv-green':proj!=null&&proj>=meta*0.75?'mv-amber':'mv-red';
     const paceMvCls=pace!=null&&avg>0&&pace>avg?'mv-red':'mv-green';
-    const pd=state.history.filter(d=>d.supervisors&&d.supervisors[si]);
-    const avgHistTotal=pd.length>0?Math.round(pd.reduce((a,d)=>a+d.supervisors[si].total,0)/pd.length):null;
-    const pdAcc=pd.filter(d=>d.supervisors[si].accuracy!=null),avgAcc=pdAcc.length>0?Math.round(pdAcc.reduce((a,d)=>a+d.supervisors[si].accuracy,0)/pdAcc.length):null;
+    const pd=state.history.map(d=>d.supervisors&&d.supervisors.find(s=>s.name===sup.name)).filter(Boolean);
+    const avgHistTotal=pd.length>0?Math.round(pd.reduce((a,s)=>a+s.total,0)/pd.length):null;
+    const pdAcc=pd.filter(s=>s.accuracy!=null),avgAcc=pdAcc.length>0?Math.round(pdAcc.reduce((a,s)=>a+s.accuracy,0)/pdAcc.length):null;
     let badge=pct===null?`<span class="badge b-info">Sin proyección</span>`:pct>=100?`<span class="badge b-ok"><i class="ti ti-circle-check"></i> En meta ${pct}%</span>`:pct>=75?`<span class="badge b-warn"><i class="ti ti-alert-triangle"></i> Bajo ritmo ${pct}%</span>`:`<span class="badge b-bad"><i class="ti ti-alert-circle"></i> Crítico ${pct}%</span>`;
     const at=alertText(si),alertHtml=at?`<div class="alert-box ${at.cls}"><i class="ti ${at.icon}"></i><div>${at.txt}</div></div>`:'';
     let regHtml='';
@@ -788,12 +837,51 @@ function renderCharts(){
   document.getElementById('legend-bar').innerHTML=sups.map((s,si)=>`<span><span class="leg-sq" style="background:${supColor(si)}99"></span>${s.name}</span>`).join('');
   // 2. Efficiency
   destroyChart('eff');
-  charts['eff']=new Chart(document.getElementById('chart-efficiency').getContext('2d'),{type:'line',data:{labels:HOURS,datasets:sups.map((sup,si)=>{const l=sup.liners.length||1;return{label:sup.name,data:hourlyVal(sup).map(v=>v>0?parseFloat((v/l).toFixed(2)):null),borderColor:supColor(si),backgroundColor:supColor(si)+'18',pointRadius:5,pointBackgroundColor:supColor(si),tension:0.3,fill:true,spanGaps:false,borderWidth:2.5};})},options:{...baseOpts,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.parsed.y} v/liner`}}}}});
-  document.getElementById('legend-efficiency').innerHTML=sups.map((s,si)=>`<span><span class="leg-sq" style="background:${supColor(si)}"></span>${s.name} (${s.liners.length} liners)</span>`).join('');
+  // Gráfica: % de meta acumulada real hora a hora (normalizada — compara Novacard vs Plata justamente)
+  charts['eff']=new Chart(document.getElementById('chart-efficiency').getContext('2d'),{type:'line',data:{labels:HOURS,datasets:sups.map((sup,si)=>{
+    const meta=supMeta(si);
+    let acum=0;
+    const data=sup.sales.map(v=>{
+      const s=String(v).trim();
+      const hasVal=s!==''&&s!=='null'&&s!=='undefined'&&!isNaN(s);
+      if(hasVal){acum+=Number(s);return parseFloat((acum/meta*100).toFixed(1));}
+      return null; // hora no registrada aún — corta la línea
+    });
+    return{label:sup.name,data,borderColor:supColor(si),backgroundColor:'transparent',pointRadius:5,pointBackgroundColor:supColor(si),tension:0.3,fill:false,spanGaps:false,borderWidth:2.5};
+  })},options:{...baseOpts,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>`${ctx.dataset.label}: ${ctx.parsed.y}% de meta`}}},scales:{x:{ticks:{autoSkip:false,font:fonts,color:tc},grid:{color:gc}},y:{beginAtZero:true,max:100,ticks:{font:fonts,color:tc,callback:v=>v+'%'},grid:{color:gc}}}}});
+  document.getElementById('legend-efficiency').innerHTML=sups.map((s,si)=>`<span><span class="leg-sq" style="background:${supColor(si)}"></span>${s.name} (meta ${supMeta(si)} · ${getMetaPerLiner(s)}/liner)</span>`).join('');
   // Ranking
-  const rankData=sups.map((sup,si)=>{const total=supTotal(sup),liners=sup.liners.length||1,logged=hoursLogged(sup),effPerHour=logged>0?total/liners/logged:0,meta=supMeta(si),proj=projectEnd(sup,si),pct=proj!=null?Math.round(proj/meta*100):0;return{name:sup.name,si,total,liners,logged,effPerHour,pct,meta,proj};}).sort((a,b)=>b.effPerHour-a.effPerHour);
+  // Ranking: ordenar por % de proyección sobre meta (normalizado — compara Novacard vs Plata justamente)
+  const rankData=sups.map((sup,si)=>{
+    const total=supTotal(sup),liners=sup.liners.length||1,logged=hoursLogged(sup);
+    const meta=supMeta(si),proj=projectEnd(sup,si);
+    const pctReal=meta>0?Math.round(total/meta*100):0; // % REAL alcanzado
+    const pctProj=proj!=null?Math.round(proj/meta*100):0;
+    const mpl=getMetaPerLiner(sup);
+    const campana=mpl===3?'Novacard':'Plata';
+    return{name:sup.name,si,total,liners,logged,pct:pctReal,pctProj,meta,proj,mpl,campana};
+  }).sort((a,b)=>b.pct-a.pct);
   const rankEl=document.getElementById('efficiency-ranking');
-  if(rankEl)rankEl.innerHTML=rankData.map((r,rank)=>{const medal=rank===0?'🥇':rank===1?'🥈':'🥉',barW=rankData[0].effPerHour>0?Math.round(r.effPerHour/rankData[0].effPerHour*100):0,statusColor=r.pct>=100?'var(--green)':r.pct>=75?'var(--amber)':'var(--red)';return`<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><span style="font-size:16px;width:22px">${medal}</span><div style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;margin-bottom:4px"><span style="color:var(--text)">${r.name}</span><span style="color:${statusColor}">${r.effPerHour.toFixed(2)} v/l/h</span></div><div style="background:var(--bg4);border-radius:3px;height:4px"><div style="width:${barW}%;height:4px;border-radius:3px;background:${supColor(r.si)};box-shadow:0 0 6px ${supColor(r.si)}60"></div></div><div style="font-size:10px;color:var(--text4);margin-top:3px;font-weight:500">${r.total} ventas · ${r.liners} liners · proy. ${r.proj!=null?r.proj:'—'} (${r.pct}%)</div></div></div>`;}).join('');
+  if(rankEl)rankEl.innerHTML=rankData.map((r,rank)=>{
+    const medal=rank===0?'🥇':rank===1?'🥈':'🥉';
+    const barW=rankData[0].pct>0?Math.round(r.pct/rankData[0].pct*100):0;
+    const statusColor=r.pct>=100?'var(--green)':r.pct>=75?'var(--amber)':'var(--red)';
+    const campanaColor=r.mpl===3?'var(--amber)':'var(--green)';
+    return`<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span style="font-size:16px;width:22px">${medal}</span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;justify-content:space-between;font-size:11px;font-weight:600;margin-bottom:2px">
+          <span style="color:var(--text)">${r.name}</span>
+          <span style="color:${statusColor};font-weight:800">${r.pct}% alcanzado</span>
+        </div>
+        <div style="font-size:9px;color:${campanaColor};font-weight:600;margin-bottom:4px">${r.campana} · meta ${r.meta} · ${r.liners} liners</div>
+        <div style="background:var(--bg4);border-radius:3px;height:4px">
+          <div style="width:${Math.min(100,r.pct)}%;height:4px;border-radius:3px;background:${supColor(r.si)};box-shadow:0 0 6px ${supColor(r.si)}60"></div>
+        </div>
+        <div style="font-size:10px;color:var(--text4);margin-top:3px;font-weight:500">${r.total} de ${r.meta} ventas · proy. ${r.proj!=null?r.proj:'—'} (${r.pctProj}%)</div>
+      </div>
+    </div>`;
+  }).join('');
   // 3. Pred vs Real
   Object.keys(charts).filter(k=>k.startsWith('vs_')).forEach(k=>destroyChart(k));
   const vsContainer=document.getElementById('chart-vs-container');vsContainer.innerHTML='';
@@ -834,7 +922,7 @@ function renderRegressionChart(){
 function renderAccuracyChart(){
   destroyChart('acc');const days=state.history;
   if(days.length===0){document.getElementById('accuracy-note').textContent='Sin historial. Cierra el día al finalizar el turno para ver la evolución de precisión del modelo.';return;}
-  const labels=days.map(d=>d.date),accBySup=state.supervisors.map((_,si)=>days.map(d=>d.supervisors[si]&&d.supervisors[si].accuracy!=null?d.supervisors[si].accuracy:null));
+  const labels=days.map(d=>d.date),accBySup=state.supervisors.map((sup)=>days.map(d=>{const s=d.supervisors&&d.supervisors.find(s=>s.name===sup.name);return s&&s.accuracy!=null?s.accuracy:null;}));
   const avgAcc=days.map(d=>{const vals=d.supervisors.map(s=>s.accuracy).filter(Boolean);return vals.length>0?Math.round(vals.reduce((a,b)=>a+b,0)/vals.length):null;});
   const validAvg=avgAcc.map((v,i)=>v!=null?{x:i,y:v}:null).filter(Boolean);let trendLine=Array(days.length).fill(null);
   if(validAvg.length>=2){const xs=validAvg.map(p=>p.x),ys=validAvg.map(p=>p.y),tr=linReg(xs,ys);if(tr)trendLine=days.map((_,i)=>Math.round(Math.min(100,Math.max(0,tr.slope*i+tr.intercept))));}
@@ -953,6 +1041,8 @@ function generarReporte(){
     const pdAcc=pd.filter(d=>{const s=d.supervisors.find(s=>s.name===sup.name);return s&&s.accuracy!=null;});
     const avgAcc=pdAcc.length>0?Math.round(pdAcc.reduce((a,d)=>{const s=d.supervisors.find(s=>s.name===sup.name);return a+(s?s.accuracy:0);},0)/pdAcc.length):null;
     const trend=reg?(reg.slope>0.15?'Creciente':reg.slope<-0.15?'Decreciente':'Estable'):'—';
+    const mpl=getMetaPerLiner(sup);
+    const campana=mpl===3?'Novacard (3/liner)':'Plata (10/liner)';
     const trendIcon=reg?(reg.slope>0.15?'▲':reg.slope<-0.15?'▼':'→'):'→';
     const status=projPct==null?'neutral':projPct>=100?'ok':projPct>=75?'warn':'bad';
     const deficit=pace!=null&&logged>0?Math.round(pace-avg):null;
@@ -967,11 +1057,7 @@ function generarReporte(){
   const totalLiners=supData.reduce((a,d)=>a+d.sup.liners.length,0);
   const allAcc=state.history.flatMap(d=>d.supervisors.map(s=>s.accuracy).filter(v=>v!=null));
   const modelAcc=allAcc.length>0?Math.round(allAcc.reduce((a,b)=>a+b,0)/allAcc.length):null;
-  const ranking=[...supData].sort((a,b)=>{
-    const ea=a.logged>0?a.total/(a.sup.liners.length||1)/a.logged:0;
-    const eb=b.logged>0?b.total/(b.sup.liners.length||1)/b.logged:0;
-    return eb-ea;
-  });
+  const ranking=[...supData].sort((a,b)=>b.pct-a.pct);
 
   const sColor={ok:'#16a34a',warn:'#b45309',bad:'#dc2626',neutral:'#6b7280'};
   const sLabel={ok:'En meta',warn:'Bajo ritmo',bad:'Crítico',neutral:'Sin datos'};
@@ -1058,13 +1144,15 @@ function generarReporte(){
   let rankRows='';
   ranking.forEach((d,i)=>{
     const medal=['🥇','🥈','🥉'][i]||(i+1)+'.';
-    const eff=d.logged>0?(d.total/(d.sup.liners.length||1)/d.logged).toFixed(2):'0.00';
+    const pctStr=d.pct+'% alcanzado'+(d.projPct!=null?' (proy. '+d.projPct+'%)':'');
+    const campana=d.mpl===3?'Novacard':'Plata';
+    const campanaColor=d.mpl===3?'#d97706':'#16a34a';
     rankRows+='<tr style="border-bottom:1px solid #e5e5e5">'
       +'<td style="padding:7px 8px;font-size:16px">'+medal+'</td>'
-      +'<td style="padding:7px 8px;font-weight:700;font-size:12px">'+d.sup.name+'</td>'
+      +'<td style="padding:7px 8px;font-weight:700;font-size:12px">'+d.sup.name+'<br><span style="font-size:9px;color:'+campanaColor+';font-weight:600">'+campana+' · '+d.mpl+'/liner</span></td>'
       +'<td style="padding:7px 8px;text-align:center;font-size:12px">'+d.total+'</td>'
       +'<td style="padding:7px 8px;text-align:center;font-size:12px">'+d.sup.liners.length+'</td>'
-      +'<td style="padding:7px 8px;text-align:center;font-weight:800;color:#ea580c;font-size:12px">'+eff+'</td>'
+      +'<td style="padding:7px 8px;text-align:center;font-weight:800;color:'+sColor[d.status]+';font-size:12px">'+pctStr+'</td>'
       +'<td style="padding:7px 8px;text-align:center"><span style="background:'+sBg[d.status]+';color:'+sColor[d.status]+';border-radius:100px;padding:2px 10px;font-size:9px;font-weight:700;text-transform:uppercase">'+sLabel[d.status]+'</span></td>'
       +'</tr>';
   });
@@ -1072,14 +1160,14 @@ function generarReporte(){
   const progColor=pctGlobal>=100?'#16a34a':pctGlobal>=75?'#b45309':'#dc2626';
 
   const html='<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'
-    +'<title>Reporte PlataCard</title>'
+    +'<title>Reporte Betel</title>'
     +'<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">'
     +'<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:"Plus Jakarta Sans",Arial,sans-serif;background:#fff;color:#111;padding:40px;max-width:860px;margin:0 auto;line-height:1.5}@media print{body{padding:20px}.no-print{display:none!important}@page{margin:1.5cm;size:A4}}</style>'
     +'</head><body>'
 
     // Header
     +'<div style="display:flex;justify-content:space-between;align-items:flex-start;padding-bottom:18px;border-bottom:2px solid #111;margin-bottom:24px">'
-    +'<div><div style="font-size:26px;font-weight:800;letter-spacing:-0.03em">PlataCard</div>'
+    +'<div><div style="font-size:26px;font-weight:800;letter-spacing:-0.03em">Betel</div>'
     +'<div style="font-size:11px;color:#444;margin-top:3px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em">Reporte de desempeño · '+(esFinal?'Cierre del día':'Corte parcial')+'</div></div>'
     +'<div style="text-align:right"><div style="font-size:13px;font-weight:700;text-transform:capitalize">'+fechaStr+'</div>'
     +'<div style="font-size:11px;color:#444;margin-top:3px">Generado '+horaStr+'</div></div></div>'
@@ -1087,7 +1175,7 @@ function generarReporte(){
     // KPIs
     +'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px">'
     +kpiCard('Total acumulado',totalGlobal,pctGlobal+'% de meta','#ea580c')
-    +kpiCard('Meta del día',metaGlobal,totalLiners+' liners × 10','#dc2626')
+    +kpiCard('Meta del día',metaGlobal,totalLiners+' liners (metas mixtas)','#dc2626')
     +kpiCard('Proyección',projGlobal,projPctGlobal+'% de meta','#2563eb')
     +kpiCard('Precisión modelo',modelAcc!=null?modelAcc+'%':'—',state.history.length+' días entrenado','#d97706')
     +'</div>'
@@ -1125,7 +1213,7 @@ function generarReporte(){
 
     // Footer
     +'<div style="border-top:1px solid #e5e5e5;padding-top:12px;display:flex;justify-content:space-between;font-size:10px;color:#666">'
-    +'<span>PlataCard Sales Intelligence</span><span>'+fechaStr+' · '+horaStr+'</span></div>'
+    +'<span>Betel Sales Intelligence</span><span>'+fechaStr+' · '+horaStr+'</span></div>'
 
     +'<div class="no-print" style="text-align:center;margin-top:28px">'
     +'<button onclick="window.print()" style="background:#ea580c;color:#fff;border:none;border-radius:8px;padding:12px 32px;font-size:14px;font-weight:700;cursor:pointer">Guardar como PDF</button>'
